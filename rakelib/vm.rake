@@ -180,17 +180,7 @@ end
 
 task 'vm/vm' => GENERATED do
   blueprint = Daedalus.load "rakelib/blueprint.rb"
-
-  tasks = [
-    "vm/vm",
-    "vm/#{Rubinius::BUILD_CONFIG[:shared_lib_name]}",
-    "vm/#{Rubinius::BUILD_CONFIG[:static_lib_name]}"
-  ]
-
-  blueprint.build tasks, @parallel_jobs
-
-  ln_sf "../vm/#{Rubinius::BUILD_CONFIG[:shared_lib_name]}", "lib/#{Rubinius::BUILD_CONFIG[:shared_lib_name]}"
-  ln_sf "../vm/#{Rubinius::BUILD_CONFIG[:static_lib_name]}", "lib/#{Rubinius::BUILD_CONFIG[:static_lib_name]}"
+  blueprint.build "vm/vm", @parallel_jobs
 end
 
 task 'vm/test/runner' => GENERATED do
