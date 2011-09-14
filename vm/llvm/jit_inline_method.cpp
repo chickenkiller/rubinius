@@ -57,19 +57,19 @@ namespace jit {
     //  Setup the CallFrame
     //
     // previous
-    b().CreateStore(prev, get_field(call_frame, offset::cf_previous));
+    b().CreateStore(prev, get_field(call_frame, offset::CallFrame::previous));
 
     // msg
     b().CreateStore(
         b().CreatePointerCast(rd, ls_->Int8PtrTy),
-        get_field(call_frame, offset::cf_msg));
+        get_field(call_frame, offset::CallFrame::dispatch_data));
 
     // cm
     method = b().CreateLoad(
         b().CreateConstGEP2_32(rd, 0, offset::runtime_data_method, "method_pos"),
         "cm");
 
-    Value* cm_gep = get_field(call_frame, offset::cf_cm);
+    Value* cm_gep = get_field(call_frame, offset::CallFrame::cm);
     b().CreateStore(method, cm_gep);
 
     // flags
@@ -77,14 +77,14 @@ namespace jit {
     if(!use_full_scope_) flags |= CallFrame::cClosedScope;
 
     b().CreateStore(ConstantInt::get(ls_->Int32Ty, flags),
-        get_field(call_frame, offset::cf_flags));
+        get_field(call_frame, offset::CallFrame::flags));
 
     // ip
     b().CreateStore(ConstantInt::get(ls_->Int32Ty, 0),
-        get_field(call_frame, offset::cf_ip));
+        get_field(call_frame, offset::CallFrame::ip));
 
     // scope
-    b().CreateStore(vars, get_field(call_frame, offset::cf_scope));
+    b().CreateStore(vars, get_field(call_frame, offset::CallFrame::scope));
 
     nil_stack(vmm_->stack_size, constant(Qnil, obj_type));
 
@@ -113,7 +113,19 @@ namespace jit {
 
       Value* pos = b().CreateGEP(vars, idx2, idx2+3, "local_pos");
 
-      b().CreateStore(stack_args[i], pos);
+      Value* arg_val = stack_args.at(i);
+
+      LocalInfo* li = info_.get_local(i);
+      li->make_argument();
+
+      if(ls_->type_optz()) {
+        if(type::KnownType::has_hint(ls_, arg_val)) {
+          type::KnownType kt = type::KnownType::extract(ls_, arg_val);
+          li->set_known_type(kt);
+        }
+      }
+
+      b().CreateStore(arg_val, pos);
     }
 
     b().CreateBr(body);

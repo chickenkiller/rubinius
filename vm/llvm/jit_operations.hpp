@@ -12,6 +12,9 @@
 
 #include "llvm/inline_policy.hpp"
 
+#include "llvm/jit_context.hpp"
+#include "llvm/types.hpp"
+
 #include <llvm/Value.h>
 #include <llvm/BasicBlock.h>
 #include <llvm/Function.h>
@@ -28,10 +31,14 @@ namespace rubinius {
 
   struct ValueHint {
     int hint;
+    llvm::MDNode* metadata;
     std::vector<Value*> data;
+    type::KnownType known_type;
 
     ValueHint()
       : hint(0)
+      , metadata(0)
+      , known_type()
     {}
   };
 
@@ -245,12 +252,14 @@ namespace rubinius {
 
       Value* gep = create_gep(obj, word_idx, 4, "word_pos");
       Value* word = create_load(gep, "flags");
-      Value* flags = b().CreatePtrToInt(word, ls_->Int32Ty, "word2flags");
+      Value* flags = b().CreatePtrToInt(word, ls_->Int64Ty, "word2flags");
 
-      Value* mask = ConstantInt::get(ls_->Int32Ty, ((1 << 9) - 1));
+      // 10 bits worth of mask
+      Value* mask = ConstantInt::get(ls_->Int64Ty, ((1 << 10) - 1));
       Value* obj_type = b().CreateAnd(flags, mask, "mask");
 
-      Value* tag = ConstantInt::get(ls_->Int32Ty, type << 1);
+      // Compare all 10 bits.
+      Value* tag = ConstantInt::get(ls_->Int64Ty, type << 2);
 
       return b().CreateICmpEQ(obj_type, tag, name);
     }
@@ -308,28 +317,74 @@ namespace rubinius {
       failure->moveAfter(cont);
     }
 
-    void check_class(Value* obj, Class* klass, BasicBlock* failure) {
+    type::KnownType check_class(Value* obj, Class* klass, BasicBlock* failure) {
       object_type type = (object_type)klass->instance_type()->to_native();
 
       switch(type) {
       case rubinius::Symbol::type:
-        verify_guard(check_is_symbol(obj), failure);
-        break;
+        if(ls_->type_optz()) {
+          type::KnownType kt = type::KnownType::extract(ls_, obj);
+
+          if(kt.symbol_p()) {
+            context().info("eliding guard: detected symbol");
+            return kt;
+          } else {
+            verify_guard(check_is_symbol(obj), failure);
+          }
+        } else {
+          verify_guard(check_is_symbol(obj), failure);
+        }
+
+        return type::KnownType::symbol();
       case rubinius::Fixnum::type:
-        verify_guard(check_is_fixnum(obj), failure);
-        break;
+        {
+          if(ls_->type_optz()) {
+            type::KnownType kt = type::KnownType::extract(ls_, obj);
+
+            if(kt.static_fixnum_p()) {
+              context().info("eliding guard: detected static fixnum");
+              return kt;
+            } else {
+              verify_guard(check_is_fixnum(obj), failure);
+            }
+          } else {
+            verify_guard(check_is_fixnum(obj), failure);
+          }
+        }
+        return type::KnownType::fixnum();
       case NilType:
         verify_guard(check_is_immediate(obj, Qnil), failure);
-        break;
+        return type::KnownType::nil();
       case TrueType:
         verify_guard(check_is_immediate(obj, Qtrue), failure);
-        break;
+        return type::KnownType::true_();
       case FalseType:
         verify_guard(check_is_immediate(obj, Qfalse), failure);
-        break;
+        return type::KnownType::false_();
       default:
-        check_reference_class(obj, klass->class_id(), failure);
-        break;
+        {
+          type::KnownType kt = type::KnownType::extract(ls_, obj);
+
+          if(kt.type_p()) {
+            if(ls_->config().jit_inline_debug) {
+              context().info_log("eliding guard") << "Type object used statically\n";
+            }
+
+            return kt;
+
+          } else if(kt.class_id() == klass->class_id()) {
+            if(ls_->config().jit_inline_debug) {
+              context().info_log("eliding redundant guard")
+                << "class " << ls_->symbol_cstr(klass->name())
+                << " (" << klass->class_id() << ")\n";
+            }
+
+            return kt;
+          }
+
+          check_reference_class(obj, klass->class_id(), failure);
+          return type::KnownType::instance(klass->class_id());
+        }
       }
     }
 
@@ -383,6 +438,7 @@ namespace rubinius {
     void set_sp(int sp) {
       sp_ = sp;
       assert(sp_ >= -1 && sp_ < vmmethod()->stack_size);
+      hints_.clear();
     }
 
     void remember_sp() {
@@ -442,6 +498,30 @@ namespace rubinius {
       }
 
       clear_hint();
+
+      if(type::KnownType::has_hint(ls_, val)) {
+        set_known_type(type::KnownType::extract(ls_, val));
+      }
+    }
+
+    void stack_push(Value* val, type::KnownType kt) {
+      kt.associate(ls_, val);
+
+      stack_ptr_adjust(1);
+      Value* stack_pos = stack_ptr();
+
+      if(val->getType() == cast<llvm::PointerType>(stack_pos->getType())->getElementType()) {
+        b().CreateStore(val, stack_pos);
+      } else {
+        Value* cst = b().CreateBitCast(
+          val,
+          ObjType, "casted");
+        b().CreateStore(cst, stack_pos);
+      }
+
+      clear_hint();
+
+      set_known_type(kt);
     }
 
     void set_hint(int hint) {
@@ -452,12 +532,56 @@ namespace rubinius {
       hints_[sp_].hint = hint;
     }
 
+    void set_known_type(type::KnownType kt) {
+      if((int)hints_.size() <= sp_) {
+        hints_.resize(sp_ + 1);
+      }
+
+      hints_[sp_].known_type = kt;
+    }
+
+    void set_hint_metadata(llvm::MDNode* md) {
+      if((int)hints_.size() <= sp_) {
+        hints_.resize(sp_ + 1);
+      }
+
+      hints_[sp_].metadata = md;
+    }
+
     int current_hint() {
       if(hints_.size() <= (size_t)sp_) {
         return 0;
       }
 
       return hints_[sp_].hint;
+    }
+
+    llvm::MDNode* current_hint_metadata() {
+      if(hints_.size() <= (size_t)sp_) {
+        return 0;
+      }
+
+      return hints_[sp_].metadata;
+    }
+
+    llvm::MDNode* hint_metadata(int back) {
+      int pos = sp_ - back;
+
+      if(hints_.size() <= (size_t)pos) {
+        return 0;
+      }
+
+      return hints_[pos].metadata;
+    }
+
+    type::KnownType hint_known_type(int back) {
+      int pos = sp_ - back;
+
+      if(hints_.size() <= (size_t)pos) {
+        return type::KnownType::unknown();
+      }
+
+      return hints_[pos].known_type;
     }
 
     ValueHint* current_hint_value() {
@@ -471,11 +595,17 @@ namespace rubinius {
     void clear_hint() {
       if(hints_.size() > (size_t)sp_) {
         hints_[sp_].hint = 0;
+        hints_[sp_].metadata = 0;
+        hints_[sp_].known_type = type::KnownType::unknown();
       }
     }
 
     llvm::Value* stack_back(int back) {
-      return b().CreateLoad(stack_back_position(back), "stack_load");
+      Instruction* I = b().CreateLoad(stack_back_position(back), "stack_load");
+      type::KnownType kt = hint_known_type(back);
+      kt.associate(ls_, I);
+
+      return I;
     }
 
     llvm::Value* stack_top() {
@@ -484,6 +614,12 @@ namespace rubinius {
 
     void stack_set_top(Value* val) {
       b().CreateStore(val, stack_ptr());
+
+      clear_hint();
+
+      if(type::KnownType::has_hint(ls_, val)) {
+        set_known_type(type::KnownType::extract(ls_, val));
+      }
     }
 
     llvm::Value* stack_pop() {
@@ -493,7 +629,7 @@ namespace rubinius {
       return val;
     }
 
-    // Scope maintainence
+    // Scope maintenance
     void flush_scope_to_heap(Value* vars) {
       Value* pos = b().CreateConstGEP2_32(vars, 0, offset::vars_on_heap,
                                      "on_heap_pos");

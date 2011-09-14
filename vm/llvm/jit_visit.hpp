@@ -4,6 +4,8 @@
 #include "builtin/tuple.hpp"
 #include "builtin/global_cache_entry.hpp"
 #include "inline_cache.hpp"
+#include "builtin/cache.hpp"
+#include "builtin/lookuptable.hpp"
 
 #include "llvm/jit_operations.hpp"
 #include "llvm/inline.hpp"
@@ -96,6 +98,7 @@ namespace rubinius {
     // The single Arguments object on the stack, plus positions into it
     // that we store the call info
     Value* out_args_;
+    Value* out_args_name_;
     Value* out_args_recv_;
     Value* out_args_block_;
     Value* out_args_total_;
@@ -124,10 +127,11 @@ namespace rubinius {
     void init_out_args() {
       out_args_ = info().out_args();
 
-      out_args_recv_ = ptr_gep(out_args_, 0, "out_args_recv");
-      out_args_block_= ptr_gep(out_args_, 1, "out_args_block");
-      out_args_total_= ptr_gep(out_args_, 2, "out_args_total");
-      out_args_arguments_ = ptr_gep(out_args_, 3, "out_args_arguments");
+      out_args_name_ = ptr_gep(out_args_, 0, "out_args_name");
+      out_args_recv_ = ptr_gep(out_args_, 1, "out_args_recv");
+      out_args_block_= ptr_gep(out_args_, 2, "out_args_block");
+      out_args_total_= ptr_gep(out_args_, 3, "out_args_total");
+      out_args_arguments_ = ptr_gep(out_args_, 4, "out_args_arguments");
       out_args_container_ = ptr_gep(out_args_, offset::args_container,
                                     "out_args_container");
     }
@@ -197,7 +201,7 @@ namespace rubinius {
 
       set_block(start);
 
-      ip_pos_ = b().CreateConstGEP2_32(call_frame_, 0, offset::cf_ip, "ip_pos");
+      ip_pos_ = b().CreateConstGEP2_32(call_frame_, 0, offset::CallFrame::ip, "ip_pos");
 
       global_serial_pos = b().CreateIntToPtr(
           ConstantInt::get(ls_->IntPtrTy, (intptr_t)ls_->shared().global_serial_address()),
@@ -230,13 +234,13 @@ namespace rubinius {
 
     Value* scope() {
       return b().CreateLoad(
-          b().CreateConstGEP2_32(call_frame_, 0, offset::cf_scope, "scope_pos"),
+          b().CreateConstGEP2_32(call_frame_, 0, offset::CallFrame::scope, "scope_pos"),
           "scope");
     }
 
     Value* top_scope() {
       return b().CreateLoad(
-          b().CreateConstGEP2_32(call_frame_, 0, offset::cf_top_scope, "top_scope_pos"),
+          b().CreateConstGEP2_32(call_frame_, 0, offset::CallFrame::top_scope, "top_scope_pos"),
           "top_scope");
     }
 
@@ -472,11 +476,11 @@ namespace rubinius {
     }
 
     void visit_push_nil() {
-      stack_push(constant(Qnil));
+      stack_push(constant(Qnil), type::KnownType::nil());
     }
 
     void visit_push_true() {
-      stack_push(constant(Qtrue));
+      stack_push(constant(Qtrue), type::KnownType::true_());
     }
 
     void visit_push_undef() {
@@ -487,27 +491,28 @@ namespace rubinius {
     }
 
     void visit_push_false() {
-      stack_push(constant(Qfalse));
+      stack_push(constant(Qfalse), type::KnownType::false_());
     }
 
     void visit_push_int(opcode arg) {
-      stack_push(constant(Fixnum::from(arg)));
+      stack_push(constant(Fixnum::from(arg)),
+                 type::KnownType::fixnum(arg));
     }
 
     void visit_meta_push_0() {
-      stack_push(constant(Fixnum::from(0)));
+      stack_push(constant(Fixnum::from(0)), type::KnownType::fixnum(0));
     }
 
     void visit_meta_push_1() {
-      stack_push(constant(Fixnum::from(1)));
+      stack_push(constant(Fixnum::from(1)), type::KnownType::fixnum(1));
     }
 
     void visit_meta_push_2() {
-      stack_push(constant(Fixnum::from(2)));
+      stack_push(constant(Fixnum::from(2)), type::KnownType::fixnum(2));
     }
 
     void visit_meta_push_neg_1() {
-      stack_push(constant(Fixnum::from(-1)));
+      stack_push(constant(Fixnum::from(-1)), type::KnownType::fixnum(-1));
     }
 
     void visit_ret() {
@@ -1096,10 +1101,10 @@ namespace rubinius {
     }
 
     Value* get_literal(opcode which) {
-      Value* gep = b().CreateConstGEP2_32(call_frame_, 0, offset::cf_cm, "cm_pos");
+      Value* gep = b().CreateConstGEP2_32(call_frame_, 0, offset::CallFrame::cm, "cm_pos");
       Value* cm =  b().CreateLoad(gep, "cm");
 
-      gep = b().CreateConstGEP2_32(cm, 0, offset::cm_literals, "literals_pos");
+      gep = b().CreateConstGEP2_32(cm, 0, offset::CompiledMethod::literals, "literals_pos");
       Value* lits = b().CreateLoad(gep, "literals");
 
       Value* idx2[] = {
@@ -1115,7 +1120,7 @@ namespace rubinius {
     void visit_push_literal(opcode which) {
       Object* lit = literal(which);
       if(Symbol* sym = try_as<Symbol>(lit)) {
-        stack_push(constant(sym));
+        stack_push(constant(sym), type::KnownType::symbol());
       } else if(kind_of<Fixnum>(lit)) {
         stack_push(constant(lit));
       } else {
@@ -1142,7 +1147,7 @@ namespace rubinius {
 
       Value* dup = b().CreateCall(func, call_args, call_args+3, "string_dup");
       check_for_exception(dup);
-      stack_push(dup);
+      stack_push(dup, type::KnownType::instance(ls_->string_class_id()));
     }
 
     void push_scope_local(Value* scope, opcode which) {
@@ -1185,7 +1190,36 @@ namespace rubinius {
 
       Value* pos = b().CreateGEP(vars_, idx2, idx2+3, "local_pos");
 
-      stack_push(b().CreateLoad(pos, "local"));
+      if(LocalInfo* bli = current_jbb_->get_local(which)) {
+        type::KnownType kt = bli->known_type();
+        kt.set_local_source(which);
+
+        stack_push(b().CreateLoad(pos, "local"), kt);
+        return;
+      }
+
+      LocalInfo* li = info().get_local(which);
+
+      /*
+      if(li->known_type().known_p()) {
+        std::cout << "push_local type known for " << which << ": "
+                  << li->known_type().describe() << ". "
+                  << (li->static_type_argument_p() ? "STA" : "not STA")
+                  << "\n";
+      }
+      */
+
+      if(!info().use_full_scope() && li->static_type_argument_p()) {
+        type::KnownType kt = li->known_type();
+        kt.set_local_source(which);
+
+        stack_push(b().CreateLoad(pos, "local"), kt);
+      } else {
+        type::KnownType kt;
+        kt.set_local_source(which);
+
+        stack_push(b().CreateLoad(pos, "local"), kt);
+      }
     }
 
     void set_scope_local(Value* scope, opcode which) {
@@ -1250,7 +1284,7 @@ namespace rubinius {
       b().CreateStore(val, pos);
     }
 
-    Value* get_self(Value* vars = 0) {
+    Instruction* get_self(Value* vars = 0) {
       if(!vars) vars = vars_;
 
       assert(vars);
@@ -1266,7 +1300,11 @@ namespace rubinius {
     }
 
     void visit_push_self() {
-      stack_push(get_self());
+      Instruction* val = get_self();
+
+      info().self_type.associate(ls_, val);
+
+      stack_push(val);
     }
 
     void visit_allow_private() {
@@ -1361,10 +1399,25 @@ namespace rubinius {
       BasicBlock* inline_body = 0;
 
       if(invoker == invoke_object_class && args == 1) {
+        Value* obj = stack_back(0);
+
+        type::KnownType kt = type::KnownType::extract(state(), obj);
+        if(kt.instance_p()) {
+          if(state()->config().jit_inline_debug) {
+            context().inline_log("inlining") << "direct class of reference\n";
+          }
+
+          stack_remove(1);
+
+          inline_klass = b().CreateBitCast(reference_class(obj), ObjType);
+          stack_push(inline_klass, type::KnownType::class_object(kt.class_id()));
+          return;
+        }
+
         if(state()->config().jit_inline_debug) {
           context().inline_log("inlining") << "custom object_class invoker\n";
         }
-        Value* obj = stack_back(0);
+
         Value* is_ref = check_is_reference(obj);
 
         BasicBlock* cont = new_block("check_class");
@@ -1440,14 +1493,15 @@ namespace rubinius {
     void visit_send_stack(opcode which, opcode args) {
       InlineCache* cache = reinterpret_cast<InlineCache*>(which);
 
-      if(cache->method) {
+      MethodCacheEntry* mce = cache->cache();
+      atomic::memory_barrier();
+
+      if(mce) {
         BasicBlock* failure = new_block("fallback");
         BasicBlock* cont = new_block("continue");
 
         Inliner inl(context(), *this, cache, args, failure);
         if(inl.consider()) {
-          // Uncommon doesn't yet know how to synthesize UnwindInfos, so
-          // don't do uncommon if there are handlers.
           if(!inl.fail_to_send() && !in_inlined_block()) {
             BasicBlock* cur = b().GetInsertBlock();
 
@@ -1460,6 +1514,12 @@ namespace rubinius {
               check_for_exception(inl.result());
             }
             stack_push(inl.result());
+
+            type::KnownType kt = inl.guarded_type();
+
+            if(kt.local_source_p() && kt.known_p()) {
+              current_jbb_->add_local(kt.local_id(), kt);
+            }
 
             b().CreateBr(cont);
 
@@ -1571,7 +1631,7 @@ namespace rubinius {
 
     void emit_create_block(opcode which, bool push=false) {
       // if we're inside an inlined method that has a block
-      // visible, that means that we've note yet emited the code to
+      // visible, that means that we've note yet emitted the code to
       // actually create the block for this inlined block.
       //
       // But, because we're about to create a block here, it might
@@ -1671,7 +1731,10 @@ namespace rubinius {
       InlineCache* cache = reinterpret_cast<InlineCache*>(which);
       CompiledMethod* block_code = 0;
 
-      if(cache->method &&
+      MethodCacheEntry* mce = cache->cache();
+      atomic::memory_barrier();
+
+      if(mce &&
           ls_->config().jit_inline_blocks &&
           !context().inlined_block()) {
         if(has_literal_block) {
@@ -1680,7 +1743,11 @@ namespace rubinius {
           // Run the policy on the block code here, if we're not going to
           // inline it, don't inline this either.
           InlineOptions opts;
-          opts.inlining_block();
+          if(ls_->config().version >= 19) {
+            opts.inlining_block_19();
+          } else {
+            opts.inlining_block();
+          }
 
           InlineDecision decision = inline_policy()->inline_p(
                                       block_code->backend_method(), opts);
@@ -1870,7 +1937,7 @@ use_send:
     }
 
     void visit_push_has_block() {
-      // We're in an inlined method, we know if there is a block staticly.
+      // We're in an inlined method, we know if there is a block statically.
       if(info().for_inlined_method()) {
         // Check for an inlined block being present, if so, this is a
         // constant!
@@ -2200,7 +2267,8 @@ use_send:
     void visit_push_scope() {
       if(info().is_block && !in_inlined_block()) {
         Value* scope = b().CreateLoad(
-            b().CreateConstGEP2_32(call_frame_, 0, offset::cf_static_scope, "scope_pos"),
+            b().CreateConstGEP2_32(call_frame_, 0,
+                                   offset::CallFrame::static_scope, "scope_pos"),
             "cm");
 
         stack_push(scope);
@@ -2211,15 +2279,15 @@ use_send:
           JITMethodInfo* creator = info().creator_info();
           assert(creator);
           cm = b().CreateLoad(
-              b().CreateConstGEP2_32(creator->call_frame(), 0, offset::cf_cm, "cm_pos"),
+              b().CreateConstGEP2_32(creator->call_frame(), 0, offset::CallFrame::cm, "cm_pos"),
               "cm");
         } else {
           cm = b().CreateLoad(
-              b().CreateConstGEP2_32(call_frame_, 0, offset::cf_cm, "cm_pos"),
+              b().CreateConstGEP2_32(call_frame_, 0, offset::CallFrame::cm, "cm_pos"),
               "cm");
         }
 
-        Value* gep = b().CreateConstGEP2_32(cm, 0, offset::cm_static_scope, "scope_pos");
+        Value* gep = b().CreateConstGEP2_32(cm, 0, offset::CompiledMethod::scope, "scope_pos");
         stack_push(b().CreateLoad(gep, "scope"));
       }
     }
@@ -2327,17 +2395,17 @@ use_send:
     void visit_cast_for_splat_block_arg() {
       JITStackArgs* inline_args = incoming_args();
       if(inline_args) {
-        std::vector<const Type*> types;
-        types.push_back(ls_->ptr_type("VM"));
-        types.push_back(ls_->Int32Ty);
-
-        FunctionType* ft = FunctionType::get(ls_->ptr_type("Object"), types, true);
-        Function* func = cast<Function>(
-            ls_->module()->getOrInsertFunction("rbx_create_array", ft));
-
         // If the arguments came from an unboxed array, we have to put them
         // back in the array before splatting them.
         if(inline_args->from_unboxed_array()) {
+          std::vector<const Type*> types;
+          types.push_back(ls_->ptr_type("VM"));
+          types.push_back(ls_->Int32Ty);
+
+          FunctionType* ft = FunctionType::get(ls_->ptr_type("Object"), types, true);
+          Function* func = cast<Function>(
+              ls_->module()->getOrInsertFunction("rbx_create_array", ft));
+
           std::vector<Value*> outgoing_args;
           outgoing_args.push_back(vm());
           outgoing_args.push_back(ConstantInt::get(ls_->Int32Ty, inline_args->size()));
@@ -2358,8 +2426,18 @@ use_send:
           Value* wrapped = b().CreateCall(func, outargs2, outargs2 + 3, "splat_ary");
           stack_push(wrapped);
         } else {
+          std::vector<const Type*> types;
+          types.push_back(ls_->ptr_type("VM"));
+          types.push_back(CallFrameTy);
+          types.push_back(ls_->Int32Ty);
+
+          FunctionType* ft = FunctionType::get(ls_->ptr_type("Object"), types, true);
+          Function* func = cast<Function>(
+              ls_->module()->getOrInsertFunction("rbx_cast_for_splat_block_arg_varargs", ft));
+
           std::vector<Value*> outgoing_args;
           outgoing_args.push_back(vm());
+          outgoing_args.push_back(call_frame_);
           outgoing_args.push_back(ConstantInt::get(ls_->Int32Ty, inline_args->size()));
 
           for(size_t i = 0; i < inline_args->size(); i++) {
@@ -2368,20 +2446,24 @@ use_send:
 
           Value* ary =
             b().CreateCall(func, outgoing_args.begin(), outgoing_args.end(), "ary");
+          check_for_exception(ary);
           stack_push(ary);
         }
       } else {
         Signature sig(ls_, ObjType);
         sig << VMTy;
+        sig << CallFrameTy;
         sig << ptr_type("Arguments");
 
         Value* call_args[] = {
           vm_,
+          call_frame_,
           args_
         };
 
-        Value* val = sig.call("rbx_cast_for_splat_block_arg", call_args, 2,
+        Value* val = sig.call("rbx_cast_for_splat_block_arg", call_args, 3,
             "cfmba", b());
+        check_for_exception(val);
         stack_push(val);
       }
     }
@@ -2653,7 +2735,7 @@ use_send:
       JITInlineBlock* ib = info().inline_block();
 
       // Hey! Look at that! We know the block we'd be yielding to
-      // staticly! woo! ok, lets just emit the code for it here!
+      // statically! woo! ok, lets just emit the code for it here!
       if(ib && ib->code()) {
         context().set_inlined_block(true);
 
@@ -2829,6 +2911,11 @@ use_send:
     }
 
     void visit_push_my_offset(opcode i) {
+      if(ls_->config().jit_inline_debug) {
+        context().inline_log("inline slot read")
+             << "offset: " << i << "\n";
+      }
+
       Value* idx[] = {
         ConstantInt::get(ls_->Int32Ty, 0),
         ConstantInt::get(ls_->Int32Ty, offset::vars_self)
@@ -3135,7 +3222,7 @@ use_send:
         JITInlineBlock* ib = info().inline_block();
 
         // Hey! Look at that! We know the block we'd be yielding to
-        // staticly! woo! ok, lets just emit the code for it here!
+        // statically! woo! ok, lets just emit the code for it here!
         if(ib && ib->code()) {
           skip_yield_stack_ = true; // skip the yield_stack, we're doing the work here.
 
@@ -3218,6 +3305,8 @@ use_send:
     }
 
     void visit_passed_arg(opcode count) {
+      count += vmmethod()->post_args;
+
       if(called_args_ >= 0) {
         if((int)count < called_args_) {
           stack_push(constant(Qtrue));
@@ -3267,7 +3356,92 @@ use_send:
       push_system_object(1);
     }
 
+    void visit_push_type() {
+      // we're calling something that returns an Object
+      Signature sig(ls_, ObjType);
+      // given a system state and a 32bit int
+      sig << VMTy;
+      sig << ls_->Int32Ty;
+
+      // the actual values of which are the calling arguments
+      Value* call_args[] = {
+        vm_,
+        ConstantInt::get(ls_->Int32Ty, 2)
+      };
+
+      // call the function we just described using the builder
+      Value* val = sig.call("rbx_push_system_object", call_args, 2, "so", b());
+      stack_push(val, type::KnownType::type());
+    }
+
     void visit_push_ivar(opcode which) {
+      Symbol* name = as<Symbol>(literal(which));
+
+      if(Class* klass = try_as<Class>(info().self_class())) {
+
+        if(ls_->config().jit_inline_debug) {
+          context().inline_log("inline ivar read")
+            << ls_->symbol_cstr(name);
+        }
+
+        // Figure out if we should use the table ivar lookup or
+        // the slot ivar lookup.
+
+        TypeInfo* ti = klass->type_info();
+        TypeInfo::Slots::iterator it = ti->slots.find(name->index());
+
+        Value* ivar = 0;
+
+        Value* self = get_self();
+
+        if(it != ti->slots.end()) {
+          int offset = ti->slot_locations[it->second];
+          ivar = get_object_slot(self, offset);
+          if(ls_->config().jit_inline_debug) {
+            ls_->log() << " (slot: " << it->second << ")";
+          }
+        } else {
+          LookupTable* pii = klass->packed_ivar_info();
+          if(!pii->nil_p()) {
+            bool found = false;
+
+            Fixnum* which = try_as<Fixnum>(pii->fetch(0, name, &found));
+            if(found) {
+              int index = which->to_native();
+              int offset = sizeof(Object) + (sizeof(Object*) * index);
+              Value* slot_val = get_object_slot(self, offset);
+
+              Value* cmp = b().CreateICmpEQ(slot_val, constant(Qundef), "prune_undef");
+
+              ivar = b().CreateSelect(cmp, constant(Qnil), slot_val, "select ivar");
+
+              if(ls_->config().jit_inline_debug) {
+                ls_->log() << " (packed index: " << index << ", " << offset << ")";
+              }
+            }
+          }
+        }
+
+        if(ivar) {
+          stack_push(ivar);
+
+          if(ls_->config().jit_inline_debug) {
+            ls_->log() << "\n";
+          }
+
+          return;
+        } else {
+          if(ls_->config().jit_inline_debug) {
+            ls_->log() << " (abort, using slow lookup)\n";
+          }
+        }
+      }
+
+      if(ls_->config().jit_inline_debug) {
+        context().inline_log("slow ivar read")
+          << ls_->symbol_cstr(name) << "\n";
+      }
+
       Signature sig(ls_, ObjType);
 
       sig << VMTy;
@@ -3289,6 +3463,48 @@ use_send:
     }
 
     void visit_set_ivar(opcode which) {
+      Symbol* name = as<Symbol>(literal(which));
+
+      if(Class* klass = try_as<Class>(info().self_class())) {
+
+        if(ls_->config().jit_inline_debug) {
+          context().inline_log("inline ivar write")
+            << ls_->symbol_cstr(name);
+        }
+
+        // slot ivars (Array#@size for example) have type checks, so use the slow
+        // path for now.
+
+        Value* self = get_self();
+
+        LookupTable* pii = klass->packed_ivar_info();
+        if(!pii->nil_p()) {
+          bool found = false;
+
+          Fixnum* which = try_as<Fixnum>(pii->fetch(0, name, &found));
+          if(found) {
+            int index = which->to_native();
+            int offset = sizeof(Object) + (sizeof(Object*) * index);
+
+            set_object_slot(self, offset, stack_top());
+
+            if(ls_->config().jit_inline_debug) {
+              ls_->log() << " (packed index: " << index << ", " << offset << ")\n";
+            }
+            return;
+          }
+        }
+
+        if(ls_->config().jit_inline_debug) {
+          ls_->log() << " (abort, using slow write)\n";
+        }
+      }
+
+      if(ls_->config().jit_inline_debug) {
+        context().inline_log("slow ivar write")
+          << ls_->symbol_cstr(name) << "\n";
+      }
+
       set_has_side_effects();
 
       Signature sig(ls_, ObjType);
@@ -3370,14 +3586,16 @@ use_send:
       Signature sig(ls_, ObjType);
 
       sig << VMTy;
+      sig << CallFrameTy;
       sig << ObjArrayTy;
 
       Value* call_args[] = {
         vm_,
+        call_frame_,
         stack_back_position(0)
       };
 
-      Value* val = sig.call("rbx_shift_array", call_args, 2, "field", b());
+      Value* val = sig.call("rbx_shift_array", call_args, 3, "field", b());
       stack_push(val);
     }
 

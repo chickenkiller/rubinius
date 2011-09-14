@@ -25,9 +25,12 @@
 #include "gc/write_barrier.hpp"
 
 #include "builtin/block_environment.hpp"
+#include "builtin/class.hpp"
 
 #include "instruments/timing.hpp"
 #include "object_utils.hpp"
+
+#include "llvm/local_info.hpp"
 
 namespace rubinius {
 
@@ -125,6 +128,8 @@ namespace rubinius {
     }
   };
 
+  typedef std::map<int, LocalInfo> LocalMap;
+
   class JITMethodInfo {
     jit::Context& context_;
     llvm::Function* function_;
@@ -153,6 +158,9 @@ namespace rubinius {
     llvm::BasicBlock* return_pad_;
     llvm::PHINode* return_phi_;
 
+    TypedRoot<Class*> self_class_;
+    LocalMap local_info_;
+
   public:
     VMMethod* vmm;
     bool is_block;
@@ -164,6 +172,7 @@ namespace rubinius {
     JITStackArgs* stack_args;
 
     JITMethodInfo* root;
+    type::KnownType self_type;
 
   public:
     JITMethodInfo(jit::Context& ctx, CompiledMethod* cm, VMMethod* v,
@@ -375,6 +384,25 @@ namespace rubinius {
       counter_ = counter;
     }
 
+    Class* self_class() {
+      return self_class_.get();
+    }
+
+    void set_self_class(Class* cls) {
+      self_class_.set(cls);
+    }
+
+    LocalInfo* get_local(int which) {
+      std::map<int, LocalInfo>::iterator i = local_info_.find(which);
+      if(i == local_info_.end()) {
+        LocalInfo li(which);
+        local_info_[which] = li;
+        return &local_info_[which];
+      }
+
+      return &i->second;
+    }
+
     llvm::AllocaInst* create_alloca(const llvm::Type* type, llvm::Value* size = 0,
                                     const llvm::Twine& name = "");
 
@@ -390,6 +418,8 @@ namespace rubinius {
     bool reachable;
     bool landing_pad;
     int exception_type;
+
+    LocalMap local_info_;
 
   public:
     JITBasicBlock()
@@ -407,6 +437,19 @@ namespace rubinius {
     llvm::BasicBlock* entry() {
       if(prologue) return prologue;
       return block;
+    }
+
+    void add_local(int which, type::KnownType kt) {
+      LocalInfo li(which);
+      li.set_known_type(kt);
+
+      local_info_[which] = li;
+    }
+
+    LocalInfo* get_local(int which) {
+      LocalMap::iterator i = local_info_.find(which);
+      if(i == local_info_.end()) return 0;
+      return &i->second;
     }
   };
 
@@ -432,7 +475,6 @@ namespace rubinius {
     Configuration& config_;
 
     BackgroundCompilerThread* background_thread_;
-    GlobalLock& global_lock_;
     SymbolTable& symbols_;
 
     int jitted_methods_;
@@ -449,6 +491,13 @@ namespace rubinius {
     std::ostream* log_;
 
     gc::WriteBarrier write_barrier_;
+    unsigned int metadata_id_;
+
+    int fixnum_class_id_;
+    int symbol_class_id_;
+    int string_class_id_;
+
+    bool type_optz_;
 
   public:
 
@@ -470,6 +519,7 @@ namespace rubinius {
 
     static LLVMState* get(STATE);
     static void shutdown(STATE);
+    static void start(STATE);
     static void on_fork(STATE);
     static void pause(STATE);
     static void unpause(STATE);
@@ -487,10 +537,6 @@ namespace rubinius {
 
     Configuration& config() {
       return config_;
-    }
-
-    GlobalLock& global_lock() {
-      return global_lock_;
     }
 
     llvm::GlobalVariable* profiling() {
@@ -554,13 +600,33 @@ namespace rubinius {
       return &write_barrier_;
     }
 
+    unsigned int metadata_id() {
+      return metadata_id_;
+    }
+
+    int fixnum_class_id() {
+      return fixnum_class_id_;
+    }
+
+    int symbol_class_id() {
+      return symbol_class_id_;
+    }
+
+    int string_class_id() {
+      return string_class_id_;
+    }
+
+    bool type_optz() {
+      return type_optz_;
+    }
+
     const llvm::Type* ptr_type(std::string name);
     const llvm::Type* type(std::string name);
 
     void compile_soon(STATE, CompiledMethod* cm, BlockEnvironment* block=0);
     void remove(llvm::Function* func);
 
-    CallFrame* find_candidate(CompiledMethod* start, CallFrame* call_frame);
+    CallFrame* find_candidate(STATE, CompiledMethod* start, CallFrame* call_frame);
     void compile_callframe(STATE, CompiledMethod* start, CallFrame* call_frame,
                            int primitive = -1);
 
@@ -570,6 +636,7 @@ namespace rubinius {
     const char* enclosure_name(CompiledMethod* cm);
 
     void shutdown_i();
+    void start_i();
     void on_fork_i();
     void pause_i();
     void unpause_i();

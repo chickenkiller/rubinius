@@ -1,5 +1,7 @@
 #ifdef ENABLE_LLVM
 
+#include "vm/config.h"
+
 #include "vmmethod.hpp"
 #include "llvm/jit.hpp"
 #include "llvm/jit_context.hpp"
@@ -24,6 +26,8 @@
 
 #include <llvm/Target/TargetOptions.h>
 
+#include "windows_compat.h"
+
 namespace autogen_types {
   void makeLLVMModuleContents(llvm::Module* module);
 }
@@ -33,7 +37,9 @@ namespace autogen_types {
 #include <fstream>
 #include <iomanip>
 #include <stdlib.h>
+#ifndef RBX_WINDOWS
 #include <dlfcn.h>
+#endif
 
 #include "llvm/jit_compiler.hpp"
 #include "llvm/jit_method.hpp"
@@ -75,6 +81,7 @@ namespace rubinius {
     , inline_block_(0)
     , block_info_(0)
     , method_(&ctx.state()->roots())
+    , self_class_(&ctx.state()->roots())
     , vmm(v)
     , is_block(false)
     , inline_return(0)
@@ -86,6 +93,7 @@ namespace rubinius {
     , root(0)
   {
     method_.set(cm);
+    self_class_.set(nil<Class>());
   }
 
   void JITMethodInfo::set_function(llvm::Function* func) {
@@ -123,6 +131,11 @@ namespace rubinius {
     state->shared.llvm_state->shutdown_i();
   }
 
+  void LLVMState::start(STATE) {
+    if(!state->shared.llvm_state) return;
+    state->shared.llvm_state->start_i();
+  }
+
   void LLVMState::on_fork(STATE) {
     if(!state->shared.llvm_state) return;
     state->shared.llvm_state->on_fork_i();
@@ -154,7 +167,8 @@ namespace rubinius {
       cUnknown,
       cRunning,
       cPaused,
-      cIdle
+      cIdle,
+      cStopped
     };
 
     thread::Mutex mutex_;
@@ -172,7 +186,8 @@ namespace rubinius {
 
   public:
     BackgroundCompilerThread(LLVMState* ls)
-      : ls_(ls)
+      : Thread(0, false)
+      , ls_(ls)
       , state(cUnknown)
       , stop_(false)
       , pause_(false)
@@ -190,6 +205,8 @@ namespace rubinius {
     void stop() {
       {
         thread::Mutex::LockGuard guard(mutex_);
+        if(state == cStopped) return;
+
         stop_ = true;
 
         if(state == cIdle) {
@@ -202,6 +219,18 @@ namespace rubinius {
       }
 
       join();
+
+      {
+        thread::Mutex::LockGuard guard(mutex_);
+        state = cStopped;
+      }
+    }
+
+    void start() {
+      thread::Mutex::LockGuard guard(mutex_);
+      if(state != cStopped) return;
+      state = cUnknown;
+      run();
     }
 
     void pause() {
@@ -242,10 +271,15 @@ namespace rubinius {
     }
 
     virtual void perform() {
+      set_name("rbx.jit");
+
+      ManagedThread::set_current(ls_);
+
+#ifndef RBX_WINDOWS
       sigset_t set;
       sigfillset(&set);
-
       pthread_sigmask(SIG_SETMASK, &set, NULL);
+#endif
 
       for(;;) { // forever
 
@@ -259,7 +293,7 @@ namespace rubinius {
             state = cPaused;
 
             paused_ = true;
-            pause_condition_.signal();
+            pause_condition_.broadcast();
 
             while(pause_) {
               condition_.wait(mutex_);
@@ -290,7 +324,7 @@ namespace rubinius {
 
         // This isn't ideal, but it's the safest. Keep the GC from
         // running while we're building the IR.
-        ls_->shared().gc_dependent();
+        ls_->shared().gc_dependent(ls_);
 
         // mutex now unlock, allowing others to push more requests
         //
@@ -299,7 +333,7 @@ namespace rubinius {
 
         void* func = 0;
         {
-          timer::Running<size_t, 1000000> timer(ls_->shared().stats.jit_time_spent);
+          timer::Running<1000000> timer(ls_->shared().stats.jit_time_spent);
 
           if(req->is_block()) {
             jit.compile_block(ls_, req->method(), req->vmmethod());
@@ -325,7 +359,7 @@ namespace rubinius {
 
           // We don't depend on the GC here, so let it run independent
           // of us.
-          ls_->shared().gc_independent();
+          ls_->shared().gc_independent(ls_);
 
           continue;
         }
@@ -366,7 +400,7 @@ namespace rubinius {
 
         // We don't depend on the GC here, so let it run independent
         // of us.
-        ls_->shared().gc_independent();
+        ls_->shared().gc_independent(ls_);
       }
     }
   };
@@ -414,7 +448,7 @@ namespace rubinius {
         unsigned *rEBX, unsigned *rECX, unsigned *rEDX) {
 #if defined(__x86_64__) || defined(_M_AMD64) || defined (_M_X64)
 #if defined(__GNUC__)
-      // gcc doesn't know cpuid would clobber ebx/rbx. Preseve it manually.
+      // gcc doesn't know cpuid would clobber ebx/rbx. Preserve it manually.
       asm ("movq\t%%rbx, %%rsi\n\t"
           "cpuid\n\t"
           "xchgq\t%%rbx, %%rsi\n\t"
@@ -490,11 +524,13 @@ namespace rubinius {
     }
   }
 
+  static const bool debug_search = false;
+
   LLVMState::LLVMState(STATE)
-    : ManagedThread(state->shared, ManagedThread::eSystem)
+    : ManagedThread(state->shared.new_thread_id(state),
+                    state->shared, ManagedThread::eSystem)
     , ctx_(llvm::getGlobalContext())
     , config_(state->shared.config)
-    , global_lock_(state->global_lock())
     , symbols_(state->shared.symbols)
     , jitted_methods_(0)
     , queued_methods_(0)
@@ -509,7 +545,7 @@ namespace rubinius {
 
     set_name("Background Compiler");
     state->shared.add_managed_thread(this);
-    state->shared.om->add_aux_barrier(&write_barrier_);
+    state->shared.om->add_aux_barrier(state, &write_barrier_);
 
     if(state->shared.config.jit_log.value.size() == 0) {
       log_ = &std::cerr;
@@ -617,13 +653,21 @@ namespace rubinius {
 
     add_internal_functions();
 
+    metadata_id_ = ctx_.getMDKindID("rbx-classid");
+
+    fixnum_class_id_ = G(fixnum_class)->class_id();
+    symbol_class_id_ = G(symbol)->class_id();
+    string_class_id_ = G(string)->class_id();
+
+    type_optz_ = state->shared.config.jit_type_optz;
+
     background_thread_ = new BackgroundCompilerThread(this);
     background_thread_->run();
   }
 
   LLVMState::~LLVMState() {
     shared_.remove_managed_thread(this);
-    shared_.om->del_aux_barrier(&write_barrier_);
+    shared_.om->del_aux_barrier(0, &write_barrier_);
   }
 
   bool LLVMState::debug_p() {
@@ -634,7 +678,12 @@ namespace rubinius {
     background_thread_->stop();
   }
 
+  void LLVMState::start_i() {
+    background_thread_->start();
+  }
+
   void LLVMState::on_fork_i() {
+    shared_.add_managed_thread(this);
     background_thread_->restart();
   }
 
@@ -671,20 +720,20 @@ namespace rubinius {
 
     // Ignore it!
     if(cm->backend_method()->call_count <= 1) {
-      if(config().jit_inline_debug) {
-        log() << "JIT: ignoring candidate! "
-          << symbol_cstr(cm->name()) << "\n";
-      }
+      // if(config().jit_inline_debug) {
+        // log() << "JIT: ignoring candidate! "
+          // << symbol_cstr(cm->name()) << "\n";
+      // }
       return;
     }
 
-    if(config().jit_inline_debug) {
+    if(debug_search) {
       if(block) {
-        log() << "JIT: queueing block inside: "
-          << symbol_cstr(cm->name()) << "\n";
+        std::cout << "JIT: queueing block inside: "
+          << enclosure_name(cm) << "#" << symbol_cstr(cm->name()) << "\n";
       } else {
-        log() << "JIT: queueing method: "
-          << symbol_cstr(cm->name()) << "\n";
+        std::cout << "JIT: queueing method: "
+          << enclosure_name(cm) << "#" << symbol_cstr(cm->name()) << "\n";
       }
     }
 
@@ -714,15 +763,15 @@ namespace rubinius {
 
       mux.unlock();
 
-      if(config().jit_inline_debug) {
-        if(block) {
-          log() << "JIT: compiled block inside: "
-                << symbol_cstr(cm->name()) << "\n";
-        } else {
-          log() << "JIT: compiled method: "
-                << symbol_cstr(cm->name()) << "\n";
-        }
-      }
+      // if(config().jit_inline_debug) {
+        // if(block) {
+          // log() << "JIT: compiled block inside: "
+                // << symbol_cstr(cm->name()) << "\n";
+        // } else {
+          // log() << "JIT: compiled method: "
+                // << symbol_cstr(cm->name()) << "\n";
+        // }
+      // }
     } else {
       background_thread_->add(req);
 
@@ -736,7 +785,7 @@ namespace rubinius {
   }
 
   void LLVMState::remove(llvm::Function* func) {
-    shared_.stats.jitted_methods--;
+    shared_.stats.jitted_methods.dec();
 
     // Deallocate the JITed code
     engine_->freeMachineCodeForFunction(func);
@@ -746,25 +795,43 @@ namespace rubinius {
     func->eraseFromParent();
   }
 
-  const static int cInlineMaxDepth = 4;
+  const static int cInlineMaxDepth = 2;
+  const static size_t eMaxInlineSendCount = 10;
 
   void LLVMState::compile_callframe(STATE, CompiledMethod* start, CallFrame* call_frame,
                                     int primitive) {
-    if(config().jit_inline_debug) {
-      if(start) {
-        log() << "JIT: target search from "
-          << symbol_cstr(start->name()) << "\n";
-      } else {
-        log() << "JIT: target search from primitive\n";
-      }
+
+    if(debug_search) {
+      std::cout << "\nJIT:       triggered: "
+            << enclosure_name(start) << "#"
+            << symbol_cstr(start->name()) << "\n";
     }
 
-    CallFrame* candidate = find_candidate(start, call_frame);
+    // if(config().jit_inline_debug) {
+      // if(start) {
+        // std::cout << "JIT: target search from "
+          // << symbol_cstr(start->name()) << "\n";
+      // } else {
+        // std::cout << "JIT: target search from primitive\n";
+      // }
+    // }
+
+    CallFrame* candidate = find_candidate(state, start, call_frame);
     if(!candidate || candidate->jitted_p() || candidate->inline_method_p()) {
-      if(config().jit_inline_debug) {
-        log() << "JIT: unable to find candidate\n";
+      if(debug_search) {
+        std::cout << "JIT: invalid candidate returned\n";
       }
+
       return;
+    }
+
+    if(debug_search) {
+      std::cout << "! ";
+      candidate->print_backtrace(state, 1);
+    }
+
+    if(start && candidate->cm != start) {
+      start->backend_method()->call_count = 0;
     }
 
     if(candidate->cm->backend_method()->call_count <= 1) {
@@ -782,28 +849,86 @@ namespace rubinius {
 
 #define SMALL_METHOD_SIZE 50
 
-  CallFrame* LLVMState::find_candidate(CompiledMethod* start, CallFrame* call_frame) {
+  CallFrame* LLVMState::find_candidate(STATE, CompiledMethod* start, CallFrame* call_frame) {
     if(!config_.jit_inline_generic) {
       return call_frame;
     }
 
     int depth = cInlineMaxDepth;
 
-    if(!start) {
-      start = call_frame->cm;
-      call_frame = call_frame->previous;
-      depth--;
+    if(!start) rubinius::bug("null start");
+    if(!call_frame) rubinius::bug("null call_frame");
+
+    // if(!start) {
+      // start = call_frame->cm;
+      // call_frame = call_frame->previous;
+      // depth--;
+    // }
+
+    if(debug_search) {
+      std::cout << "> call_count: " << call_frame->cm->backend_method()->call_count
+            << " size: " << call_frame->cm->backend_method()->total
+            << " sends: " << call_frame->cm->backend_method()->inline_cache_count()
+            << "\n";
+
+      call_frame->print_backtrace(state, 1);
     }
 
-    if(!call_frame || start->backend_method()->total > SMALL_METHOD_SIZE) {
+    if(start->backend_method()->total > SMALL_METHOD_SIZE) {
+      if(debug_search) {
+        std::cout << "JIT: STOP. reason: trigger method isn't small: "
+              << start->backend_method()->total << " > "
+              << SMALL_METHOD_SIZE
+              << "\n";
+      }
+
       return call_frame;
     }
 
-    CallFrame* caller = call_frame;
+    VMMethod* vmm = start->backend_method();
+
+    if(vmm->required_args != vmm->total_args) {
+      if(debug_search) {
+        std::cout << "JIT: STOP. reason: trigger method req_args != total_args\n";
+      }
+
+      return call_frame;
+    }
+
+    if(vmm->no_inline_p()) {
+      if(debug_search) {
+        std::cout << "JIT: STOP. reason: trigger method no_inline_p() = true\n";
+      }
+
+      return call_frame;
+    }
+
+    CallFrame* callee = call_frame;
+    call_frame = call_frame->previous;
+
+    // Now start looking at callers.
 
     while(depth-- > 0) {
       CompiledMethod* cur = call_frame->cm;
+
+      if(!cur) {
+        if(debug_search) {
+          std::cout << "JIT: STOP. reason: synthetic CallFrame hit\n";
+        }
+        return callee;
+      }
+
       VMMethod* vmm = cur->backend_method();
+
+      if(debug_search) {
+        std::cout << "> call_count: " << vmm->call_count
+              << " size: " << vmm->total
+              << " sends: " << vmm->inline_cache_count()
+              << "\n";
+
+        call_frame->print_backtrace(state, 1);
+      }
+
 
       /*
       if(call_frame->block_p()
@@ -811,27 +936,88 @@ namespace rubinius {
           || vmm->call_count < 200 // not called much
           || vmm->jitted() // already jitted
           || vmm->parent() // is a block
-        ) return caller;
+        ) return callee;
       */
 
-      if(vmm->required_args != vmm->total_args // has a splat
-          || vmm->call_count < 200 // not called much
-          || vmm->jitted() // already jitted
-          || !vmm->no_inline_p() // method marked as not inlinable
-        ) return caller;
+      if(vmm->required_args != vmm->total_args) {
+        if(debug_search) {
+          std::cout << "JIT: STOP. reason: req_args != total_args\n";
+        }
+        return callee;
+      }
 
-      CallFrame* next = call_frame->previous;
+      if(vmm->call_count < 200) {
+        if(debug_search) {
+          std::cout << "JIT: STOP. reason: call_count too small: "
+                << vmm->call_count << " < 200\n";
+        }
 
-      if(!next|| cur->backend_method()->total > SMALL_METHOD_SIZE) return call_frame;
+        return callee;
+      }
 
-      caller = call_frame;
-      call_frame = next;
+      if(vmm->jitted()) {
+        if(debug_search) {
+          std::cout << "JIT: STOP. reason: already jitted\n";
+        }
+
+        return callee;
+      }
+
+      if(vmm->no_inline_p()) {
+        if(debug_search) {
+          std::cout << "JIT: STOP. reason: no_inline_p() = true\n";
+        }
+
+        return callee;
+      }
+
+      if(vmm->inline_cache_count() > eMaxInlineSendCount) {
+        if(debug_search) {
+          std::cout << "JIT: STOP. reason: high send count\n";
+        }
+
+        return call_frame;
+      }
+
+      // if(vmm->required_args != vmm->total_args // has a splat
+          // || vmm->call_count < 200 // not called much
+          // || vmm->jitted() // already jitted
+          // || !vmm->no_inline_p() // method marked as not inlineable
+        // ) return callee;
+
+      CallFrame* prev = call_frame->previous;
+
+      if(!prev) {
+        if(debug_search) {
+          std::cout << "JIT: STOP. reason: toplevel method\n";
+        }
+        return call_frame;
+      }
+
+      // if(cur->backend_method()->total > SMALL_METHOD_SIZE) {
+        // if(debug_search) {
+          // std::cout << "JIT: STOP. reason: big method: "
+                // << cur->backend_method()->total << " > "
+                // << SMALL_METHOD_SIZE
+                // << "\n";
+        // }
+
+        // return call_frame;
+      // }
+
+      // if(!next || cur->backend_method()->total > SMALL_METHOD_SIZE) return call_frame;
+
+      callee->cm->backend_method()->call_count = 0;
+
+      callee = call_frame;
+      call_frame = prev;
     }
 
-    return caller;
+    return callee;
   }
 
   void LLVMState::show_machine_code(void* buffer, size_t size) {
+#ifndef RBX_WINDOWS
     ud_t ud;
 
     ud_init(&ud);
@@ -886,6 +1072,7 @@ namespace rubinius {
 
       std::cout << "\n";
     }
+#endif  // !RBX_WINDOWS
   }
 
 }

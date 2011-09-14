@@ -33,6 +33,7 @@ describe "IO.select" do
     t.abort_on_exception = true
     result = IO.select [@rd], nil, nil, nil
     result.should == [[@rd], [], []]
+    t.join
   end
 
   it "leaves out IO objects for which there is no I/O ready" do
@@ -89,7 +90,7 @@ describe "IO.select" do
   it "sleeps the specified timeout if all streams are nil" do
     start = Time.now
     IO.select(nil, nil, nil, 0.1)
-    (Time.now - start).should >= 0.1
+    (Time.now - start).should be_close(0.1, 0.005)
   end
 
   it "does not accept negative timeouts" do

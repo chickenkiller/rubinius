@@ -1,4 +1,7 @@
 class IO
+
+  include Enumerable
+
   # Import platform constants
 
   SEEK_SET = Rubinius::Config['rbx.platform.io.SEEK_SET']
@@ -81,7 +84,7 @@ class IO
       return 0 if @write_synced or empty?
       @write_synced = true
 
-      io.prim_write(String.from_bytearray(@storage, @start, size))
+      io.prim_write(String.from_chararray(@storage, @start, size))
       reset!
 
       return size
@@ -149,7 +152,7 @@ class IO
         total = size
         total = count if count and count < total
 
-        str = String.from_bytearray @storage, @start, total
+        str = String.from_chararray @storage, @start, total
         @start += total
 
         str
@@ -283,6 +286,9 @@ class IO
       ret |= RDWR
     when ?b
       ret |= BINARY
+    when ?:
+      warn("encoding options not supported in 1.8")
+      return ret
     else
       raise ArgumentError, "invalid mode -- #{mode}"
     end
@@ -295,6 +301,9 @@ class IO
       ret |= RDWR
     when ?b
       ret |= BINARY
+    when ?:
+      warn("encoding options not supported in 1.8")
+      return ret
     else
       raise ArgumentError, "invalid mode -- #{mode}"
     end
