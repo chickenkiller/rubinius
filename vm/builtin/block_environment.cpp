@@ -32,7 +32,7 @@
 #endif
 
 #ifdef ENABLE_LLVM
-#include "llvm/jit.hpp"
+#include "llvm/state.hpp"
 #endif
 
 #include <iostream>
@@ -67,7 +67,7 @@ namespace rubinius {
     }
 
 #ifdef ENABLE_LLVM
-    if(void* ptr = vmm->native_function()) {
+    if(executor ptr = vmm->unspecialized) {
       return (*((BlockExecutor)ptr))(state, previous, env, args, invocation);
     }
 #endif
@@ -102,13 +102,14 @@ namespace rubinius {
          *  2. OR takes one argument and a splat
          *  3. OR has the form { |a, | }
          *  4. OR has the form { |(a, b)| }
+         *  5. OR has the form { |(a, b), c| }
          *
          * then we check if the one argument is an Array. If it is not, call
          * #to_ary to convert it to an Array and raise if #to_ary does not
          * return an Array.
          *
-         * Finally, in cases 1-3 above, we destructure the Array into the
-         * block's arguments.
+         * Finally, in cases 1-3, and 5 above, we destructure the Array into
+         * the block's arguments.
          */
         if(total_args == 1
             && (vmm->required_args > 1
@@ -128,7 +129,7 @@ namespace rubinius {
           }
 
           if(ary) {
-            if(vmm->splat_position == -4) {
+            if(vmm->splat_position == -4 && vmm->required_args == 1) {
               args.use_argument(ary);
             } else {
               args.use_array(ary);
@@ -261,7 +262,7 @@ namespace rubinius {
       if(vmm->call_count >= state->shared.config.jit_call_til_compile) {
         LLVMState* ls = LLVMState::get(state);
 
-        ls->compile_soon(state, env->code(), env);
+        ls->compile_soon(state, env->code(), env, true);
 
       } else {
         vmm->call_count++;
@@ -298,7 +299,7 @@ namespace rubinius {
                                        | CallFrame::cBlock;
 
     // TODO: this is a quick hack to process block arguments in 1.9.
-    if(LANGUAGE_19_ENABLED(state) || LANGUAGE_20_ENABLED(state)) {
+    if(!LANGUAGE_18_ENABLED(state)) {
       if(!GenericArguments::call(state, frame, vmm, scope, args, invocation.flags)) {
         return NULL;
       }

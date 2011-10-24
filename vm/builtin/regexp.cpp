@@ -396,6 +396,8 @@ namespace rubinius {
       return Qnil;
     }
 
+    while(!atomic::compare_and_swap(&lock_, 0, 1));
+
     maybe_recompile(state);
 
     int begin_reg[10] = { ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
@@ -410,9 +412,6 @@ namespace rubinius {
                          ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS };
 
     OnigRegion region = { 10, 0, begin_reg, end_reg, 0, 0 };
-    // onig_region_init(&region);
-
-    while(!atomic::compare_and_swap(&lock_, 0, 1));
 
     int* back_match = onig_data->int_map_backward;
 
@@ -477,12 +476,22 @@ namespace rubinius {
     if(pos > max) return Qnil;
     str += pos;
 
+    while(!atomic::compare_and_swap(&lock_, 0, 1));
+
     maybe_recompile(state);
 
-    OnigRegion region;
-    onig_region_init(&region);
+    int begin_reg[10] = { ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS };
+    int end_reg[10] =  { ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS };
 
-    while(!atomic::compare_and_swap(&lock_, 0, 1));
+    OnigRegion region = { 10, 0, begin_reg, end_reg, 0, 0 };
 
     int* back_match = onig_data->int_map_backward;
 
@@ -524,6 +533,8 @@ namespace rubinius {
       Exception::argument_error(state, "Not properly initialized Regexp");
     }
 
+    while(!atomic::compare_and_swap(&lock_, 0, 1));
+
     maybe_recompile(state);
 
     max = string->size();
@@ -534,10 +545,18 @@ namespace rubinius {
 
     str += pos;
 
-    OnigRegion region;
-    onig_region_init(&region);
+    int begin_reg[10] = { ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS };
+    int end_reg[10] =  { ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS,
+                         ONIG_REGION_NOTPOS, ONIG_REGION_NOTPOS };
 
-    while(!atomic::compare_and_swap(&lock_, 0, 1));
+    OnigRegion region = { 10, 0, begin_reg, end_reg, 0, 0 };
 
     int* back_match = onig_data->int_map_backward;
 

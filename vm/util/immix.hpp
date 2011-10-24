@@ -637,6 +637,7 @@ namespace immix {
           ++i) {
         Chunk* chunk = *i;
         chunk->free();
+        delete chunk;
       }
     }
 
@@ -1090,8 +1091,10 @@ namespace immix {
     /**
      * Calls the Describer to scan from each of the Addresses in the mark stack.
      */
-    void process_mark_stack(Allocator& alloc) {
+    bool process_mark_stack(Allocator& alloc) {
       Marker<Describer> mark(this, alloc);
+
+      if(mark_stack_.empty()) return false;
 
       // Use while() since mark_stack_ is modified as we walk it.
       while(!mark_stack_.empty()) {
@@ -1099,6 +1102,8 @@ namespace immix {
         mark_stack_.pop_back();
         desc.walk_pointers(addr, mark);
       }
+
+      return true;
     }
 
     /**

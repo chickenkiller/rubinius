@@ -11,8 +11,13 @@ Daedalus.blueprint do |i|
 
   if ENV['DEV']
     gcc.cflags << "-O0"
+    gcc.mtime_only = true
   else
     gcc.cflags << "-O2"
+  end
+
+  if ENV['POKE']
+    gcc.mtime_only = true
   end
 
   # This is necessary for the gcc sync prims to fully work

@@ -34,14 +34,6 @@ class String
     alias_method :dup, :clone
   end
 
-  def initialize(arg = undefined)
-    replace StringValue(arg) unless arg.equal?(undefined)
-
-    self
-  end
-
-  private :initialize
-
   # call-seq:
   #   str % arg   => new_str
   #
@@ -95,29 +87,6 @@ class String
     r.taint if tainted? or other.tainted?
     r
   end
-
-  # Append --- Concatenates the given object to <i>self</i>. If the object is a
-  # <code>Fixnum</code> between 0 and 255, it is converted to a character before
-  # concatenation.
-  #
-  #   a = "hello "
-  #   a << "world"   #=> "hello world"
-  #   a.concat(33)   #=> "hello world!"
-  def <<(other)
-    modify!
-
-    unless other.kind_of? String
-      if other.kind_of?(Integer) && other >= 0 && other <= 255
-        other = other.chr
-      else
-        other = StringValue(other)
-      end
-    end
-
-    taint if other.tainted?
-    append(other)
-  end
-  alias_method :concat, :<<
 
   # call-seq:
   #   str <=> other_str   => -1, 0, +1
@@ -240,13 +209,12 @@ class String
   #    a["bye"]               #=> nil
   def [](index, other = undefined)
     unless other.equal?(undefined)
-      length = Rubinius::Type.coerce_to(other, Fixnum, :to_int)
-
       if index.kind_of? Regexp
-        match, str = subpattern(index, length)
+        match, str = subpattern(index, other)
         Regexp.last_match = match
         return str
       else
+        length = Rubinius::Type.coerce_to(other, Fixnum, :to_int)
         start  = Rubinius::Type.coerce_to(index, Fixnum, :to_int)
         return substring(start, length)
       end
@@ -505,79 +473,6 @@ class String
     str.chomp!(separator) || str
   end
 
-  # Modifies <i>self</i> in place as described for <code>String#chomp</code>,
-  # returning <i>self</i>, or <code>nil</code> if no modifications were made.
-  #---
-  # NOTE: TypeError is raised in String#replace and not in String#chomp! when
-  # self is frozen. This is intended behaviour.
-  #+++
-  def chomp!(sep=undefined)
-    # special case for performance. No seperator is by far the most common usage.
-    if sep.equal?(undefined)
-      return if @num_bytes == 0
-
-      Rubinius.check_frozen
-
-      c = @data[@num_bytes-1]
-      if c == 10 # ?\n
-        @num_bytes -= 1 if @num_bytes > 1 && @data[@num_bytes-2] == 13 # ?\r
-      elsif c != 13 # ?\r
-        return
-      end
-
-      # don't use modify! because it will dup the data when we don't need to.
-      @hash_value = nil
-      @num_bytes = @num_bytes - 1
-      return self
-    end
-
-    return if sep.nil? || @num_bytes == 0
-    sep = StringValue sep
-
-    if (sep == $/ && sep == DEFAULT_RECORD_SEPARATOR) || sep == "\n"
-      c = @data[@num_bytes-1]
-      if c == 10 # ?\n
-        @num_bytes -= 1 if @num_bytes > 1 && @data[@num_bytes-2] == 13 # ?\r
-      elsif c != 13 # ?\r
-        return
-      end
-
-      Rubinius.check_frozen
-
-      # don't use modify! because it will dup the data when we don't need to.
-      @hash_value = nil
-      @num_bytes = @num_bytes - 1
-    elsif sep.size == 0
-      size = @num_bytes
-      while size > 0 && @data[size-1] == 10 # ?\n
-        if size > 1 && @data[size-2] == 13 # ?\r
-          size -= 2
-        else
-          size -= 1
-        end
-      end
-
-      return if size == @num_bytes
-
-      Rubinius.check_frozen
-
-      # don't use modify! because it will dup the data when we don't need to.
-      @hash_value = nil
-      @num_bytes = size
-    else
-      size = sep.size
-      return if size > @num_bytes || sep.compare_substring(self, -size, size) != 0
-
-      Rubinius.check_frozen
-
-      # don't use modify! because it will dup the data when we don't need to.
-      @hash_value = nil
-      @num_bytes = @num_bytes - size
-    end
-
-    return self
-  end
-
   # Returns a new <code>String</code> with the last character removed.  If the
   # string ends with <code>\r\n</code>, both characters are removed. Applying
   # <code>chop</code> to an empty string returns an empty
@@ -592,24 +487,6 @@ class String
   def chop
     str = dup
     str.chop! || str
-  end
-
-  # Processes <i>self</i> as for <code>String#chop</code>, returning <i>self</i>,
-  # or <code>nil</code> if <i>self</i> is the empty string.  See also
-  # <code>String#chomp!</code>.
-  def chop!
-    return if @num_bytes == 0
-
-    self.modify!
-
-    if @num_bytes > 1 and
-        @data[@num_bytes-1] == 10 and @data[@num_bytes-2] == 13
-      @num_bytes = @num_bytes - 2
-    else
-      @num_bytes = @num_bytes - 1
-    end
-
-    self
   end
 
   # Each <i>other_string</i> parameter defines a set of characters to count.  The
@@ -692,6 +569,13 @@ class String
     end
   end
 
+  # Clears the contents of <i>self</i>, returning the empty string.
+  def clear
+    Rubinius.check_frozen
+    delete!(self)
+    self
+  end
+
   # Returns a copy of <i>self</i> with all uppercase letters replaced with their
   # lowercase counterparts. The operation is locale insensitive---only
   # characters ``A'' to ``Z'' are affected.
@@ -737,7 +621,7 @@ class String
 
   # Passes each byte in <i>self</i> to the given block.
   #
-  #   "hello".each_byte {|c| print c, ' ' }
+  #   "hello".each_byte { |c| print c, ' ' }
   #
   # <em>produces:</em>
   #
@@ -761,11 +645,11 @@ class String
   # appended together.
   #
   #   print "Example one\n"
-  #   "hello\nworld".each {|s| p s}
+  #   "hello\nworld".each { |s| p s }
   #   print "Example two\n"
-  #   "hello\nworld".each('l') {|s| p s}
+  #   "hello\nworld".each('l') { |s| p s }
   #   print "Example three\n"
-  #   "hello\n\n\nworld".each('') {|s| p s}
+  #   "hello\n\n\nworld".each('') { |s| p s }
   #
   # <em>produces:</em>
   #
@@ -919,7 +803,7 @@ class String
   #
   #   "hello".gsub(/[aeiou]/, '*')              #=> "h*ll*"
   #   "hello".gsub(/([aeiou])/, '<\1>')         #=> "h<e>ll<o>"
-  #   "hello".gsub(/./) {|s| s[0].to_s + ' '}   #=> "104 101 108 108 111 "
+  #   "hello".gsub(/./) { |s| s[0].to_s + ' ' } #=> "104 101 108 108 111 "
   def gsub(pattern, replacement=undefined)
     unless block_given? or replacement != undefined
       return to_enum(:gsub, pattern, replacement)
@@ -942,7 +826,7 @@ class String
 
     last_end = 0
     offset = nil
-    ret = substring(0,0) # Empty string and string subclass
+    ret = substring(0, 0) # Empty string and string subclass
 
     last_match = nil
     match = pattern.match_from self, last_end
@@ -1047,7 +931,7 @@ class String
 
     last_match = nil
 
-    ret = substring(0,0) # Empty string and string subclass
+    ret = substring(0, 0) # Empty string and string subclass
     offset = match.begin 0 if match
 
     while match
@@ -1102,18 +986,6 @@ class String
     else
       return nil
     end
-  end
-
-  # Treats leading characters from <i>self</i> as a string of hexadecimal digits
-  # (with an optional sign and an optional <code>0x</code>) and returns the
-  # corresponding number. Zero is returned on error.
-  #
-  #    "0x0a".hex     #=> 10
-  #    "-1234".hex    #=> -4660
-  #    "0".hex        #=> 0
-  #    "wombat".hex   #=> 0
-  def hex
-    to_inum(16, false)
   end
 
   # Returns <code>true</code> if <i>self</i> contains the given string or
@@ -1256,31 +1128,6 @@ class String
     str.lstrip! || str
   end
 
-  # Removes leading whitespace from <i>self</i>, returning <code>nil</code> if no
-  # change was made. See also <code>String#rstrip!</code> and
-  # <code>String#strip!</code>.
-  #
-  #   "  hello  ".lstrip   #=> "hello  "
-  #   "hello".lstrip!      #=> nil
-  def lstrip!
-    return if @num_bytes == 0
-
-    start = 0
-
-    ctype = Rubinius::CType
-
-    while start < @num_bytes && ctype.isspace(@data[start])
-      start += 1
-    end
-
-    return if start == 0
-
-    modify!
-    @num_bytes = @num_bytes - start
-    @data.move_bytes start, @num_bytes, 0
-    self
-  end
-
   # Converts <i>pattern</i> to a <code>Regexp</code> (if it isn't already one),
   # then invokes its <code>match</code> method on <i>self</i>.
   #
@@ -1313,46 +1160,8 @@ class String
     to_inum(-8, false)
   end
 
-  # Replaces the contents and taintedness of <i>string</i> with the corresponding
-  # values in <i>other</i>.
-  #
-  #   s = "hello"         #=> "hello"
-  #   s.replace "world"   #=> "world"
-  def replace(other)
-    # If we're replacing with ourselves, then we have nothing to do
-    return self if equal?(other)
-
-    Rubinius.check_frozen
-
-    other = StringValue(other)
-
-    @shared = true
-    other.shared!
-    @data = other.__data__
-    @num_bytes = other.num_bytes
-    @hash_value = nil
-
-    taint if other.tainted?
-
-    self
-  end
-  alias_method :initialize_copy, :replace
-  # private :initialize_copy
-
-  # Returns a new string with the characters from <i>self</i> in reverse order.
-  #
-  #   "stressed".reverse   #=> "desserts"
   def reverse
     dup.reverse!
-  end
-
-  # Reverses <i>self</i> in place.
-  def reverse!
-    return self if @num_bytes <= 1
-    self.modify!
-
-    @data.reverse(0, @num_bytes)
-    self
   end
 
   # Returns the index of the last occurrence of the given <i>substring</i>,
@@ -1502,35 +1311,6 @@ class String
     str.rstrip! || str
   end
 
-  # Removes trailing whitespace from <i>self</i>, returning <code>nil</code> if
-  # no change was made. See also <code>String#lstrip!</code> and
-  # <code>String#strip!</code>.
-  #
-  #   "  hello  ".rstrip   #=> "  hello"
-  #   "hello".rstrip!      #=> nil
-  def rstrip!
-    return if @num_bytes == 0
-
-    stop = @num_bytes - 1
-
-    while stop >= 0 && @data[stop] == 0
-      stop -= 1
-    end
-
-    ctype = Rubinius::CType
-
-    while stop >= 0 && ctype.isspace(@data[stop])
-      stop -= 1
-    end
-
-    return if (stop += 1) == @num_bytes
-
-    modify!
-    @num_bytes = stop
-    self
-  end
-
-
   # Both forms iterate through <i>self</i>, matching the pattern (which may be a
   # <code>Regexp</code> or a <code>String</code>). For each match, a result is
   # generated and either added to the result array or passed to the block. If
@@ -1546,9 +1326,9 @@ class String
   #
   # And the block form:
   #
-  #   a.scan(/\w+/) {|w| print "<<#{w}>> " }
+  #   a.scan(/\w+/) { |w| print "<<#{w}>> " }
   #   print "\n"
-  #   a.scan(/(.)(.)/) {|x,y| print y, x }
+  #   a.scan(/(.)(.)/) { |x,y| print y, x }
   #   print "\n"
   #
   # <em>produces:</em>
@@ -1601,49 +1381,14 @@ class String
   # This method is specifically part of 1.9 but we enable it in 1.8 also
   # because we need it internally.
   def setbyte(index, byte)
-    index = size + index if index < 0
-    @data[index] = byte
-  end
-
-  # Deletes the specified portion from <i>self</i>, and returns the portion
-  # deleted. The forms that take a <code>Fixnum</code> will raise an
-  # <code>IndexError</code> if the value is out of range; the <code>Range</code>
-  # form will raise a <code>RangeError</code>, and the <code>Regexp</code> and
-  # <code>String</code> forms will silently ignore the assignment.
-  #
-  #   string = "this is a string"
-  #   string.slice!(2)        #=> 105
-  #   string.slice!(3..6)     #=> " is "
-  #   string.slice!(/s.*t/)   #=> "sa st"
-  #   string.slice!("r")      #=> "r"
-  #   string                  #=> "thing"
-  def slice!(one, two=undefined)
-    # This is un-DRY, but it's a simple manual argument splitting. Keeps
-    # the code fast and clean since the sequence are pretty short.
-    #
-    if two.equal?(undefined)
-      result = slice(one)
-
-      if one.kind_of? Regexp
-        lm = Regexp.last_match
-        self[one] = '' if result
-        Regexp.last_match = lm
-      else
-        self[one] = '' if result
-      end
-    else
-      result = slice(one, two)
-
-      if one.kind_of? Regexp
-        lm = Regexp.last_match
-        self[one, two] = '' if result
-        Regexp.last_match = lm
-      else
-        self[one, two] = '' if result
-      end
+    unless byte.instance_of?(Fixnum)
+      raise TypeError, "can't convert #{byte.class} into Integer"
     end
 
-    result
+    Rubinius.check_frozen
+
+    index = size + index if index < 0
+    @data[index] = byte
   end
 
   # Divides <i>self</i> into substrings based on a delimiter, returning an array
@@ -1859,31 +1604,6 @@ class String
     str.squeeze!(*strings) || str
   end
 
-  # Squeezes <i>self</i> in place, returning either <i>self</i>, or
-  # <code>nil</code> if no changes were made.
-  def squeeze!(*strings)
-    return if @num_bytes == 0
-    self.modify!
-
-    table = count_table(*strings).__data__
-
-    i, j, last = 1, 0, @data[0]
-    while i < @num_bytes
-      c = @data[i]
-      unless c == last and table[c] == 1
-        @data[j+=1] = last = c
-      end
-      i += 1
-    end
-
-    if (j += 1) < @num_bytes
-      @num_bytes = j
-      self
-    else
-      nil
-    end
-  end
-
   def start_with?(*prefixes)
     prefixes.each do |prefix|
       prefix = Rubinius::Type.check_convert_type prefix, String, :to_str
@@ -1932,7 +1652,7 @@ class String
   #
   #   "hello".sub(/[aeiou]/, '*')               #=> "h*llo"
   #   "hello".sub(/([aeiou])/, '<\1>')          #=> "h<e>llo"
-  #   "hello".sub(/./) {|s| s[0].to_s + ' ' }   #=> "104 ello"
+  #   "hello".sub(/./) { |s| s[0].to_s + ' ' }  #=> "104 ello"
   def sub(pattern, replacement=undefined)
     if replacement.equal?(undefined) and !block_given?
       raise ArgumentError, "wrong number of arguments (1 for 2)"
@@ -1977,49 +1697,6 @@ class String
     return out
   end
 
-  # Performs the substitutions of <code>String#sub</code> in place,
-  # returning <i>self</i>, or <code>nil</code> if no substitutions were
-  # performed.
-  def sub!(pattern, replacement=undefined)
-    # Copied mostly from sub to keep Regexp.last_match= working right.
-
-    if replacement.equal?(undefined) and !block_given?
-      raise ArgumentError, "wrong number of arguments (1 for 2)"
-    end
-
-    unless pattern
-      raise ArgumentError, "wrong number of arguments (0 for 2)"
-    end
-
-    if match = get_pattern(pattern, true).match_from(self, 0)
-      out = match.pre_match
-
-      Regexp.last_match = match
-
-      if replacement.equal?(undefined)
-        replacement = yield(match[0].dup).to_s
-        out.taint if replacement.tainted?
-        out.append(replacement).append(match.post_match)
-      else
-        out.taint if replacement.tainted?
-        replacement = StringValue(replacement).to_sub_replacement(out, match)
-        out.append(match.post_match)
-      end
-
-      # We have to reset it again to match the specs
-      Regexp.last_match = match
-
-      out.taint if self.tainted?
-    else
-      out = self
-      Regexp.last_match = nil
-      return nil
-    end
-
-    replace(out)
-
-    return self
-  end
 
   # Returns the successor to <i>self</i>. The successor is calculated by
   # incrementing characters starting from the rightmost alphanumeric (or
@@ -2417,23 +2094,20 @@ class String
   end
 
   def subpattern(pattern, capture)
-    # TODO: A part of the functionality here should go into MatchData#[]
     match = pattern.match(self)
-    if !match or capture >= match.size
-      return nil
+
+    return nil unless match
+
+    if index = Rubinius::Type.check_convert_type(capture, Fixnum, :to_int)
+      return nil if index >= match.size || -index >= match.size
+      capture = index
     end
 
-    if capture < 0
-      capture += match.size
-      return nil if capture <= 0
-    end
-
-    start = match.begin(capture)
-    count = match.end(capture) - match.begin(capture)
-    str = self.substring(start, count)
+    str = match[capture]
     str.taint if pattern.tainted?
     [match, str]
   end
+  private :subpattern
 
   def subpattern_set(pattern, capture, replacement)
     unless match = pattern.match(self)

@@ -71,9 +71,12 @@ class Configure
     @llvm_source_url        = "http://llvm.org/releases/2.8/llvm-2.8.tgz"
     @llvm_asset_path        = "http://asset.rubini.us/prebuilt"
 
-    @gcc_major = `#{@cc} -dumpversion`.strip.split(".")[0,2].join(".")
 
     if @host == "i686-pc-linux-gnu" || @host == "x86_64-unknown-linux-gnu"
+      check_tool_version @cc, '-dumpversion', [4, 1]
+      check_tool_version 'bison', '--version', [2, 3]
+
+      @gcc_major = `#{@cc} -dumpversion`.strip.split(".")[0,2].join(".")
       @llvm_generic_prebuilt  = "llvm-#{@llvm_version}-#{@host}-#{@gcc_major}.tar.bz2"
     else
       @llvm_generic_prebuilt  = "llvm-#{@llvm_version}-#{@host}.tar.bz2"
@@ -111,11 +114,11 @@ class Configure
     @libversion = "2.0"
     @version = "#{@libversion}.0dev"
     @release_date = "yyyy-mm-dd"
-    @config_version = 138
+    @config_version = 139
 
     # TODO: add conditionals for platforms
     if RbConfig::CONFIG["build_os"] =~ /darwin/
-      @ldshared = "#{@cc} -dynamic -bundle -undefined suppress -flat_namespace"
+      @ldshared = "#{@cc} -bundle -undefined suppress -flat_namespace"
     else
       @ldshared = "#{@cc} -shared"
     end
@@ -330,7 +333,7 @@ class Configure
     feature "execinfo", default_on
     feature "C-readline", true
     feature "ruby-readline", false
-    feature "vendor-zlib", true
+    feature "vendor-zlib", !!@windows
 
     o.doc "\n Help!"
 
@@ -868,7 +871,7 @@ int main() { return tgetnum(""); }
       @rb_readline = true
     end
 
-    @vendor_zlib = false unless @features["vendor-zlib"]
+    @vendor_zlib = true if @features["vendor-zlib"]
   end
 
   def process
@@ -924,6 +927,25 @@ int main() { return tgetnum(""); }
     end
 
     return "#{name}-#{version}"
+  end
+
+  def check_tool_version(tool_name, opts, version, regexp=/(?=\d)(\d+).(\d+).?(\d+)?/)
+    @log.print "Checking #{tool_name}:"
+
+    output = `#{tool_name} #{opts}`
+
+    if $?.exitstatus == 0
+      v = output.scan(regexp)[0].map(&:to_i)
+      unless (v <=> version) >= 0
+        msg = " Expected #{tool_name} version >= #{version.join('.')}, found #{v.join('.')}"
+        @log.error msg
+        failure
+      end
+      @log.write " found"
+    else
+      @log.error " not found"
+      failure
+    end
   end
 
   def write_config

@@ -46,6 +46,7 @@ class Module
         method_name = Rubinius::Type.coerce_to_symbol meth
         mod, method = lookup_method(method_name)
         sc.method_table.store method_name, method.method, :public
+        Rubinius::VM.reset_method_cache method_name
         set_visibility method_name, :private
       end
     end
@@ -196,14 +197,5 @@ class Module
     return nil
   end
 
-  def attr(name,writeable=false)
-    vis = Rubinius::VariableScope.of_sender.method_visibility
-
-    Rubinius.add_reader name, self, vis
-    Rubinius.add_writer name, self, vis if writeable
-
-    return nil
-  end
-
-  private :alias_method
+  private :alias_method, :attr_reader, :attr_writer, :attr_accessor
 end

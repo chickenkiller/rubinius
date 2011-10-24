@@ -7,6 +7,18 @@ module Kernel
     end.send(:define_method, *args, &block)
   end
 
+  def loop
+    return to_enum(:loop) unless block_given?
+
+    begin
+      while true
+        yield
+      end
+    rescue StopIteration
+    end
+  end
+  module_function :loop
+
   def Integer(obj, base=nil)
     if obj.kind_of? String
       if obj.empty?
@@ -85,4 +97,70 @@ module Kernel
   end
 
   module_function :proc
+
+  # Attempt to load the given file, returning true if successful. Works just
+  # like Kernel#require, except that it searches relative to the current
+  # directory.
+  #
+  def require_relative(name)
+    scope = Rubinius::StaticScope.of_sender
+    Rubinius::CodeLoader.require_relative(name, scope)
+  end
+  module_function :require_relative
+
+  def String(obj)
+    return obj if obj.kind_of? String
+
+    begin
+      str = obj.to_s
+    rescue NoMethodError
+      raise TypeError, "can't convert #{obj.class} into String"
+    end
+
+    unless str.kind_of? String
+      raise TypeError, "#to_s did not return a String"
+    end
+
+    return str
+  end
+  module_function :String
+  
+  def Array(obj)
+    ary = Rubinius::Type.check_convert_type obj, Array, :to_ary
+
+    return ary if ary
+
+    if obj.respond_to?(:to_a) && array = Rubinius::Type.check_convert_type(obj, Array, :to_a)
+      array
+    else
+      [obj]
+    end
+  end
+  module_function :Array
+
+  def =~(other)
+    nil
+  end
+  
+  def Float(obj)
+    raise TypeError, "can't convert nil into Float" if obj.nil?
+
+    case obj
+    when Float
+      obj
+    when String
+      valid_re = /^\s*[+-]?((\d+_?)*\d+(\.(\d+_?)*\d+)?|\.(\d+_?)*\d+)(\s*|([eE][+-]?(\d+_?)*\d+)\s*)$/
+
+      m = valid_re.match(obj)
+
+      if !m or !m.pre_match.empty? or !m.post_match.empty?
+        raise ArgumentError, "invalid value for Float(): #{obj.inspect}"
+      end
+      obj.convert_float
+    else
+      Rubinius::Type.coerce_to(obj, Float, :to_f)
+    end
+  end
+  module_function :Float
+  
 end

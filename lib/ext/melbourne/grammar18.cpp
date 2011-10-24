@@ -8059,6 +8059,7 @@ string_to_ast(VALUE ptp, const char *f, bstring s, int line)
     }
     pt_free(parser_state);
     free(parser_state);
+    quark_cleanup();
     return ret;
 }
 
@@ -8120,6 +8121,7 @@ file_to_ast(VALUE ptp, const char *f, FILE *file, int start)
 
     pt_free(parser_state);
     free(parser_state);
+    quark_cleanup();
     return ret;
 }
 
@@ -11180,7 +11182,11 @@ rb_parser_sym(const char *name)
       case '$':
         id |= ID_GLOBAL;
         m++;
-        if (!is_identchar(*m)) m++;
+        if(!m[0]) { // Detect a :"$"
+          id = ID_LOCAL;
+        } else if (!is_identchar(*m)) {
+          m++;
+        }
         break;
       case '@':
         if (name[1] == '@') {

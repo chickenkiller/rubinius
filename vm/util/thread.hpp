@@ -89,11 +89,15 @@ namespace thread {
     // Set the name of the thread. Be sure to call this inside perform
     // so that the system can see the proper thread to set if that is
     // available (OS X only atm)
-    void set_name(const char* name) {
-      name_ = name;
+    static void set_os_name(const char* name) {
 #ifdef HAVE_PTHREAD_SETNAME
       pthread_setname_np(name);
 #endif
+    }
+
+    void set_name(const char* name) {
+      name_ = name;
+      set_os_name(name);
     }
 
     static pthread_t self() {
@@ -392,7 +396,7 @@ namespace thread {
     }
 
     std::string describe() {
-      std::stringstream ss;
+      std::ostringstream ss;
       ss << "Mutex ";
       ss << (void*)this;
       return ss.str();
@@ -478,7 +482,7 @@ namespace thread {
     bool try_lock() { return cLocked; }
 
     std::string describe() {
-      std::stringstream ss;
+      std::ostringstream ss;
       ss << "NullLock ";
       ss << (void*)this;
       return ss.str();
@@ -522,7 +526,7 @@ namespace thread {
     }
 
     std::string describe() {
-      std::stringstream ss;
+      std::ostringstream ss;
       ss << "SpinLock ";
       ss << (void*)this;
       return ss.str();
@@ -563,7 +567,7 @@ namespace thread {
     }
 
     std::string describe() {
-      std::stringstream ss;
+      std::ostringstream ss;
       ss << "SpinLock ";
       ss << (void*)this;
       return ss.str();

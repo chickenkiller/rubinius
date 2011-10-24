@@ -51,6 +51,14 @@ module Rubinius
       Rubinius.const_set 'TERMINAL_WIDTH', width
 
       $VERBOSE = false
+
+      # We export the language mode into the environment so subprocesses like
+      # extension compiling during gem installs use the correct mode.
+      options = ENV["RBXOPT"]
+      language_mode = "-X#{Rubinius::RUBY_LIB_VERSION}"
+      unless options and options.include? language_mode
+        ENV["RBXOPT"] = "#{options} #{language_mode}".strip
+      end
     end
 
     # Setup $LOAD_PATH.
@@ -558,6 +566,12 @@ to rebuild the compiler.
       end
     end
 
+    def rubygems
+      @stage = "loading Rubygems"
+
+      require "rubygems" if Rubinius.ruby19?
+    end
+
     # Require any -r arguments
     def requires
       @stage = "requiring command line files"
@@ -760,6 +774,7 @@ to rebuild the compiler.
           load_paths
           debugger
           agent
+          rubygems
           requires
           evals
           script

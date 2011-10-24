@@ -15,6 +15,9 @@
 #include "llvm/jit_context.hpp"
 #include "llvm/types.hpp"
 
+#include "llvm/method_info.hpp"
+#include "llvm/jit_runtime.hpp"
+
 #include <llvm/Value.h>
 #include <llvm/BasicBlock.h>
 #include <llvm/Function.h>
@@ -24,6 +27,8 @@
 using namespace llvm;
 
 namespace rubinius {
+
+  class JITStackArgs;
 
   namespace jit {
     class Context;
@@ -49,6 +54,18 @@ namespace rubinius {
 
     llvm::IRBuilder<> builder_;
     std::vector<ValueHint> hints_;
+
+  protected:
+
+    // The single Arguments object on the stack, plus positions into it
+    // that we store the call info
+    Value* out_args_;
+    Value* out_args_name_;
+    Value* out_args_recv_;
+    Value* out_args_block_;
+    Value* out_args_total_;
+    Value* out_args_arguments_;
+    Value* out_args_container_;
 
   protected:
     JITMethodInfo& method_info_;
@@ -126,6 +143,34 @@ namespace rubinius {
       if(inline_policy_ and own_policy_) delete inline_policy_;
     }
 
+    void init_out_args() {
+      out_args_ = info().out_args();
+
+      out_args_name_ = ptr_gep(out_args_, 0, "out_args_name");
+      out_args_recv_ = ptr_gep(out_args_, 1, "out_args_recv");
+      out_args_block_= ptr_gep(out_args_, 2, "out_args_block");
+      out_args_total_= ptr_gep(out_args_, 3, "out_args_total");
+      out_args_arguments_ = ptr_gep(out_args_, 4, "out_args_arguments");
+      out_args_container_ = ptr_gep(out_args_, offset::args_container,
+                                    "out_args_container");
+    }
+
+    void setup_out_args(int args) {
+      b().CreateStore(stack_back(args), out_args_recv_);
+      b().CreateStore(constant(Qnil), out_args_block_);
+      b().CreateStore(cint(args),
+                    out_args_total_);
+      b().CreateStore(Constant::getNullValue(ptr_type("Tuple")),
+                      out_args_container_);
+      if(args > 0) {
+        b().CreateStore(stack_objects(args), out_args_arguments_);
+      }
+    }
+
+    Value* out_args() {
+      return out_args_;
+    }
+
     IRBuilder<>& b() { return builder_; }
 
     void set_valid_flag(llvm::Value* val) {
@@ -201,8 +246,12 @@ namespace rubinius {
       return call_frame_;
     }
 
-    Value* cint(int num) {
-      return ConstantInt::get(ls_->Int32Ty, num);
+    llvm::Value* cint(int num) {
+      return ls_->cint(num);
+    }
+
+    llvm::Value* clong(uintptr_t num) {
+      return llvm::ConstantInt::get(ls_->IntPtrTy, num);
     }
 
     // Type resolution and manipulation
@@ -234,10 +283,10 @@ namespace rubinius {
 
     Value* check_type_bits(Value* obj, int type, const char* name = "is_type") {
       Value* word_idx[] = {
-        ConstantInt::get(ls_->Int32Ty, 0),
-        ConstantInt::get(ls_->Int32Ty, 0),
-        ConstantInt::get(ls_->Int32Ty, 0),
-        ConstantInt::get(ls_->Int32Ty, 0)
+        zero_,
+        zero_,
+        zero_,
+        zero_
       };
 
       if(obj->getType() != ObjType) {
@@ -375,7 +424,7 @@ namespace rubinius {
           } else if(kt.class_id() == klass->class_id()) {
             if(ls_->config().jit_inline_debug) {
               context().info_log("eliding redundant guard")
-                << "class " << ls_->symbol_cstr(klass->name())
+                << "class " << ls_->symbol_debug_str(klass->name())
                 << " (" << klass->class_id() << ")\n";
             }
 
@@ -383,7 +432,11 @@ namespace rubinius {
           }
 
           check_reference_class(obj, klass->class_id(), failure);
-          return type::KnownType::instance(klass->class_id());
+          if(kind_of<SingletonClass>(klass)) {
+            return type::KnownType::singleton_instance(klass->class_id());
+          } else {
+            return type::KnownType::instance(klass->class_id());
+          }
         }
       }
     }
@@ -715,7 +768,7 @@ namespace rubinius {
           obj, ls_->Int32Ty, "as_int");
 
       return b().CreateLShr(
-          i, ConstantInt::get(ls_->Int32Ty, 1),
+          i, one_,
           "lshr");
     }
 
@@ -779,8 +832,8 @@ namespace rubinius {
     // Tuple access
     Value* get_tuple_size(Value* tup) {
       Value* idx[] = {
-        ConstantInt::get(ls_->Int32Ty, 0),
-        ConstantInt::get(ls_->Int32Ty, offset::tuple_full_size)
+        zero_,
+        cint(offset::tuple_full_size)
       };
 
       Value* pos = create_gep(tup, idx, 2, "table_size_pos");
@@ -807,7 +860,7 @@ namespace rubinius {
           llvm::PointerType::getUnqual(ObjType), "obj_array");
 
       Value* idx2[] = {
-        ConstantInt::get(ls_->Int32Ty, offset / sizeof(Object*))
+        cint(offset / sizeof(Object*))
       };
 
       Value* pos = create_gep(cst, idx2, 1, "field_pos");
@@ -823,7 +876,7 @@ namespace rubinius {
           llvm::PointerType::getUnqual(ObjType), "obj_array");
 
       Value* idx2[] = {
-        ConstantInt::get(ls_->Int32Ty, offset / sizeof(Object*))
+        cint(offset / sizeof(Object*))
       };
 
       Value* pos = create_gep(cst, idx2, 1, "field_pos");
@@ -906,6 +959,12 @@ namespace rubinius {
       Value* call_args[] = { val };
 
       sig.call("rbx_jit_debug_spot", call_args, 1, "", b());
+    }
+
+    Value* gc_literal(Object* obj, const Type* type) {
+      jit::GCLiteral* lit = method_info_.runtime_data()->new_literal(obj);
+      Value* ptr = constant(lit->address_of_object(), llvm::PointerType::getUnqual(type));
+      return b().CreateLoad(ptr, "gc_literal");
     }
 
     virtual void check_for_exception(llvm::Value* val, bool pass_top=true) = 0;

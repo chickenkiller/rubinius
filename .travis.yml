@@ -1,7 +1,13 @@
 before_script: ./configure
-env:
-  - "RBXOPT=-X18"
-  - "RBXOPT=-X19"
+branches:
+  only:
+    - master
 notifications:
-  email: false
+  recipients:
+    - evan+notify@phx.io
+    - bford@engineyard.com
+    - d.bussink@gmail.com
+  email:
+    on_success: change
+    on_failure: always
   webhooks: http://elle.fallingsnow.net:13424/

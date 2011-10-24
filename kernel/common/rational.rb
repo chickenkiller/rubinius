@@ -6,21 +6,21 @@
 #       by Keiju ISHITSUKA(SHL Japan Inc.)
 #
 # Documentation by Kevin Jackson and Gavin Sinclair.
-# 
+#
 # When you <tt>require 'rational'</tt>, all interactions between numbers
 # potentially return a rational result.  For example:
 #
 #   1.quo(2)              # -> 0.5
 #   require 'rational'
 #   1.quo(2)              # -> Rational(1,2)
-# 
+#
 # See Rational for full documentation.
 #
 
 
 #
 # Creates a Rational number (i.e. a fraction).  +a+ and +b+ should be Integers:
-# 
+#
 #   Rational(1,3)           # -> 1/3
 #
 # Note: trying to construct a Rational with floating point or real values
@@ -51,7 +51,7 @@ end
 # Examples:
 #   Rational(5,6)             # -> 5/6
 #   Rational(5)               # -> 5/1
-# 
+#
 # Rational numbers are reduced to their lowest terms:
 #   Rational(6,10)            # -> 3/5
 #
@@ -75,9 +75,11 @@ class Rational < Numeric
       num = -num
       den = -den
     end
-    gcd = num.gcd(den)
-    num = num.div(gcd)
-    den = den.div(gcd)
+    if num.kind_of?(Integer) && den.kind_of?(Integer)
+      gcd = num.gcd(den)
+      num = num.div(gcd)
+      den = den.div(gcd)
+    end
     if den == 1 && defined?(Unify)
       num
     else
@@ -220,8 +222,14 @@ class Rational < Numeric
   #
   def ** (other)
     if other.kind_of?(Rational)
+      if self == 0 && other < 0 && other.denominator == 1
+        raise ZeroDivisionError, "divided by 0"
+      end
       Float(self) ** other
     elsif other.kind_of?(Integer)
+      if self == 0 && other < 0
+        raise ZeroDivisionError, "divided by 0"
+      end
       if other > 0
         num = @numerator ** other
         den = @denominator ** other
@@ -256,6 +264,9 @@ class Rational < Numeric
   #   r % 0.26             # -> 0.19
   #
   def % (other)
+    if other == 0.0
+      raise ZeroDivisionError, "division by zero"
+    end
     value = (self / other).floor
     return self - other * value
   end
@@ -268,6 +279,9 @@ class Rational < Numeric
   #   r.divmod Rational(1,2)   # -> [3, Rational(1,4)]
   #
   def divmod(other)
+    if other.is_a?(Float) && other == 0.0
+      raise ZeroDivisionError, "division by zero"
+    end
     value = (self / other).floor
     return value, self - other * value
   end
@@ -294,7 +308,7 @@ class Rational < Numeric
   #
   def == (other)
     if other.kind_of?(Rational)
-      @numerator == other.numerator and @denominator == other.denominator
+      @numerator == other.numerator and (@denominator == other.denominator or @numerator.zero?)
     elsif other.kind_of?(Integer)
       self == Rational.new!(other, 1)
     elsif other.kind_of?(Float)
@@ -398,11 +412,7 @@ class Rational < Numeric
   #   Rational(8).to_s            #  "8"
   #
   def to_s
-    if @denominator == 1
-      @numerator.to_s
-    else
-      @numerator.to_s+"/"+@denominator.to_s
-    end
+    @numerator.to_s+"/"+@denominator.to_s
   end
 
   #
@@ -418,7 +428,7 @@ class Rational < Numeric
   #   Rational(5,8).inspect     # -> "Rational(5, 8)"
   #
   def inspect
-    sprintf("Rational(%s, %s)", @numerator.inspect, @denominator.inspect)
+    "(#{to_s})"
   end
 
   #
@@ -432,84 +442,6 @@ class Rational < Numeric
   attr_reader :denominator
 
   private :initialize
-end
-
-class Integer
-  #
-  # In an integer, the value _is_ the numerator of its rational equivalent.
-  # Therefore, this method returns +self+.
-  #
-  def numerator
-    self
-  end
-
-  #
-  # In an integer, the denominator is 1.  Therefore, this method returns 1.
-  #
-  def denominator
-    1
-  end
-
-  #
-  # Returns a Rational representation of this integer.
-  #
-  def to_r
-    Rational(self, 1)
-  end
-
-  #
-  # Returns the <em>greatest common denominator</em> of the two numbers (+self+
-  # and +n+).
-  #
-  # Examples:
-  #   72.gcd 168           # -> 24
-  #   19.gcd 36            # -> 1
-  #
-  # The result is positive, no matter the sign of the arguments.
-  #
-  def gcd(other)
-    min = self.abs
-    max = other.abs
-    while min > 0
-      tmp = min
-      min = max % min
-      max = tmp
-    end
-    max
-  end
-
-  #
-  # Returns the <em>lowest common multiple</em> (LCM) of the two arguments
-  # (+self+ and +other+).
-  #
-  # Examples:
-  #   6.lcm 7        # -> 42
-  #   6.lcm 9        # -> 18
-  #
-  def lcm(other)
-    if self.zero? or other.zero?
-      0
-    else
-      (self.div(self.gcd(other)) * other).abs
-    end
-  end
-
-  #
-  # Returns the GCD _and_ the LCM (see #gcd and #lcm) of the two arguments
-  # (+self+ and +other+).  This is more efficient than calculating them
-  # separately.
-  #
-  # Example:
-  #   6.gcdlcm 9     # -> [3, 18]
-  #
-  def gcdlcm(other)
-    gcd = self.gcd(other)
-    if self.zero? or other.zero?
-      [gcd, 0]
-    else
-      [gcd, (self.div(gcd) * other).abs]
-    end
-  end
 end
 
 class Fixnum
@@ -529,6 +461,9 @@ class Fixnum
       Rational.new!(self, 1)**other
     end
   end
+end
+
+class Integer
 end
 
 class Bignum

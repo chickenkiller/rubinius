@@ -13,9 +13,10 @@
 #include "builtin/string.hpp"
 #include "builtin/symbol.hpp"
 #include "builtin/module.hpp"
+#include "builtin/nativemethod.hpp"
 
 #ifdef ENABLE_LLVM
-#include "llvm/jit.hpp"
+#include "llvm/state.hpp"
 #if RBX_LLVM_API_VER == 208
 #include <llvm/System/Threading.h>
 #elif RBX_LLVM_API_VER == 209
@@ -273,7 +274,7 @@ namespace rubinius {
     state->set_run_signals(true);
     SignalHandler* handler = new SignalHandler(state);
     shared->set_signal_handler(handler);
-    handler->run();
+    handler->run(state);
 
 #ifndef RBX_WINDOWS
     // Ignore sigpipe.
@@ -405,12 +406,12 @@ namespace rubinius {
       config.print();
     }
 
-    if(config.agent_port > 0) {
+    if(config.agent_start > 0) {
       // if port_ is 1, the user wants to use a randomly assigned local
       // port which will be written to the temp file for console to pick
       // up.
 
-      int port = config.agent_port;
+      int port = config.agent_start;
       if(port == 1) port = 0;
       start_agent(port);
     }
@@ -516,7 +517,7 @@ namespace rubinius {
             << ", expected "
             << as<Fixnum>(exc->get_ivar(state, state->symbol("@expected")))->to_native();
       }
-      msg << " (" << exc->klass()->name()->c_str(state) << ")";
+      msg << " (" << exc->klass()->name()->debug_str(state) << ")";
       std::cout << msg.str() << "\n";
       exc->print_locations(state);
       Assertion::raise(msg.str().c_str());
@@ -539,15 +540,18 @@ namespace rubinius {
       state->shared.checkpoint(state);
     }
 
+    NativeMethod::cleanup_thread(state);
+
 #ifdef ENABLE_LLVM
     LLVMState::shutdown(state);
 #endif
+
+    SignalHandler::shutdown();
 
     // Hold everyone.
     state->shared.stop_the_world(state);
     shared->om->run_all_io_finalizers(state);
 
-    SignalHandler::shutdown();
     // TODO: temporarily disable to sort out finalizing Pointer objects
     // shared->om->run_all_finalizers(state);
   }

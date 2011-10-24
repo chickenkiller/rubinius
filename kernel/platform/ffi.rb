@@ -69,7 +69,7 @@ module FFI
     def config_hash(name)
       vals = {}
       section = "rbx.platform.#{name}."
-      Rubinius::Config.section section do |key,value|
+      Rubinius::Config.section section do |key, value|
         vals[key.substring(section.size, key.length)] = value
       end
       vals
@@ -182,6 +182,16 @@ module FFI
       attr_reader :size
       attr_reader :implementation
     end
+
+    class StructByValue
+      def initialize(struct)
+        @implementation = struct
+      end
+
+      attr_reader :implementation
+    end
+
+    Struct = StructByValue
   end
 end
 
@@ -191,10 +201,10 @@ end
 module FFI::Platform
   case
   when Rubinius.windows?
-    LIBSUFFIX = ".dll"
+    LIBSUFFIX = "dll"
   when Rubinius.darwin?
-    LIBSUFFIX = ".dylib"
+    LIBSUFFIX = "dylib"
   else
-    LIBSUFFIX = ".so"
+    LIBSUFFIX = "so"
   end
 end

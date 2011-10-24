@@ -11,6 +11,8 @@
 #include "llvm/inline.hpp"
 #include "llvm/jit_context.hpp"
 
+#include "llvm/stack_args.hpp"
+
 #include <llvm/DerivedTypes.h>
 
 #include <list>
@@ -95,16 +97,6 @@ namespace rubinius {
 
     Value* global_serial_pos;
 
-    // The single Arguments object on the stack, plus positions into it
-    // that we store the call info
-    Value* out_args_;
-    Value* out_args_name_;
-    Value* out_args_recv_;
-    Value* out_args_block_;
-    Value* out_args_total_;
-    Value* out_args_arguments_;
-    Value* out_args_container_;
-
     int called_args_;
     int sends_done_;
     bool has_side_effects_;
@@ -123,18 +115,6 @@ namespace rubinius {
     static const int cHintLazyBlockArgs = 1;
 
     class Unsupported {};
-
-    void init_out_args() {
-      out_args_ = info().out_args();
-
-      out_args_name_ = ptr_gep(out_args_, 0, "out_args_name");
-      out_args_recv_ = ptr_gep(out_args_, 1, "out_args_recv");
-      out_args_block_= ptr_gep(out_args_, 2, "out_args_block");
-      out_args_total_= ptr_gep(out_args_, 3, "out_args_total");
-      out_args_arguments_ = ptr_gep(out_args_, 4, "out_args_arguments");
-      out_args_container_ = ptr_gep(out_args_, offset::args_container,
-                                    "out_args_container");
-    }
 
     JITVisit(LLVMState* ls, JITMethodInfo& info, BlockMap& bm,
              llvm::BasicBlock* start)
@@ -204,7 +184,7 @@ namespace rubinius {
       ip_pos_ = b().CreateConstGEP2_32(call_frame_, 0, offset::CallFrame::ip, "ip_pos");
 
       global_serial_pos = b().CreateIntToPtr(
-          ConstantInt::get(ls_->IntPtrTy, (intptr_t)ls_->shared().global_serial_address()),
+          clong((intptr_t)ls_->shared().global_serial_address()),
           llvm::PointerType::getUnqual(ls_->IntPtrTy), "cast_to_intptr");
 
       init_out_args();
@@ -433,7 +413,7 @@ namespace rubinius {
     }
 
     void flush_ip() {
-      b().CreateStore(ConstantInt::get(ls_->Int32Ty, current_ip_), ip_pos_);
+      b().CreateStore(cint(current_ip_), ip_pos_);
     }
 
     void flush() {
@@ -453,7 +433,7 @@ namespace rubinius {
       // the actual values of which are the calling arguments
       Value* call_args[] = {
         vm_,
-        ConstantInt::get(ls_->Int32Ty, which)
+        cint(which)
       };
 
       // call the function we just described using the builder
@@ -613,8 +593,8 @@ namespace rubinius {
 
     void check_fixnums(Value* left, Value* right, BasicBlock* if_true,
                        BasicBlock* if_false) {
-      Value* mask = ConstantInt::get(ls_->IntPtrTy, TAG_FIXNUM_MASK);
-      Value* tag  = ConstantInt::get(ls_->IntPtrTy, TAG_FIXNUM);
+      Value* mask = clong(TAG_FIXNUM_MASK);
+      Value* tag  = clong(TAG_FIXNUM);
 
       Value* lint = cast_int(left);
       Value* rint = cast_int(right);
@@ -628,8 +608,8 @@ namespace rubinius {
 
     void check_both_not_references(Value* left, Value* right, BasicBlock* if_true,
                             BasicBlock* if_false) {
-      Value* mask = ConstantInt::get(ls_->IntPtrTy, TAG_REF_MASK);
-      Value* zero = ConstantInt::get(ls_->IntPtrTy, TAG_REF);
+      Value* mask = clong(TAG_REF_MASK);
+      Value* zero = clong(TAG_REF);
 
       Value* lint = cast_int(left);
       lint = b().CreateAnd(lint, mask, "mask");
@@ -656,22 +636,10 @@ namespace rubinius {
       sig << ObjArrayTy;
     }
 
-    void setup_out_args(int args) {
-      b().CreateStore(stack_back(args), out_args_recv_);
-      b().CreateStore(constant(Qnil), out_args_block_);
-      b().CreateStore(ConstantInt::get(ls_->Int32Ty, args),
-                    out_args_total_);
-      b().CreateStore(Constant::getNullValue(ptr_type("Tuple")),
-                      out_args_container_);
-      if(args > 0) {
-        b().CreateStore(stack_objects(args), out_args_arguments_);
-      }
-    }
-
     void setup_out_args_with_block(int args) {
       b().CreateStore(stack_back(args + 1), out_args_recv_);
       b().CreateStore(stack_top(), out_args_block_);
-      b().CreateStore(ConstantInt::get(ls_->Int32Ty, args),
+      b().CreateStore(cint(args),
                     out_args_total_);
       b().CreateStore(Constant::getNullValue(ptr_type("Tuple")),
                       out_args_container_);
@@ -682,12 +650,12 @@ namespace rubinius {
 
     Value* invoke_inline_cache(InlineCache* cache) {
       Value* cache_const = b().CreateIntToPtr(
-          ConstantInt::get(ls_->IntPtrTy, reinterpret_cast<uintptr_t>(cache)),
+          clong(reinterpret_cast<uintptr_t>(cache)),
           ptr_type("InlineCache"), "cast_to_ptr");
 
       Value* execute_pos_idx[] = {
-        ConstantInt::get(ls_->Int32Ty, 0),
-        ConstantInt::get(ls_->Int32Ty, offset::ic_execute),
+        cint(0),
+        cint(offset::ic_execute),
       };
 
       Value* execute_pos = b().CreateGEP(cache_const,
@@ -716,12 +684,12 @@ namespace rubinius {
     Value* block_send(InlineCache* cache, int args, bool priv=false) {
       sends_done_++;
       Value* cache_const = b().CreateIntToPtr(
-          ConstantInt::get(ls_->IntPtrTy, reinterpret_cast<uintptr_t>(cache)),
+          clong(reinterpret_cast<uintptr_t>(cache)),
           ptr_type("InlineCache"), "cast_to_ptr");
 
       Value* execute_pos_idx[] = {
-        ConstantInt::get(ls_->Int32Ty, 0),
-        ConstantInt::get(ls_->Int32Ty, offset::ic_execute),
+        cint(0),
+        cint(offset::ic_execute),
       };
 
       Value* execute_pos = b().CreateGEP(cache_const,
@@ -763,7 +731,7 @@ namespace rubinius {
         vm_,
         call_frame_,
         constant(name),
-        ConstantInt::get(ls_->IntPtrTy, args),
+        clong(args),
         stack_objects(args + 3),   // 3 == recv + block + splat
       };
 
@@ -792,7 +760,7 @@ namespace rubinius {
         vm_,
         call_frame_,
         constant(name),
-        ConstantInt::get(ls_->IntPtrTy, args),
+        clong(args),
         stack_objects(args + extra),
       };
 
@@ -813,7 +781,7 @@ namespace rubinius {
       sig << "Object";
 
       Value* cache_const = b().CreateIntToPtr(
-          ConstantInt::get(ls_->IntPtrTy, reinterpret_cast<uintptr_t>(cache)),
+          clong(reinterpret_cast<uintptr_t>(cache)),
           ptr_type("InlineCache"), "cast_to_ptr");
 
       Value* args[] = {
@@ -1108,9 +1076,9 @@ namespace rubinius {
       Value* lits = b().CreateLoad(gep, "literals");
 
       Value* idx2[] = {
-        ConstantInt::get(ls_->Int32Ty, 0),
-        ConstantInt::get(ls_->Int32Ty, offset::tuple_field),
-        ConstantInt::get(ls_->Int32Ty, which)
+        cint(0),
+        cint(offset::tuple_field),
+        cint(which)
       };
 
       gep = b().CreateGEP(lits, idx2, idx2+3, "literal_pos");
@@ -1163,9 +1131,9 @@ namespace rubinius {
 
     Value* local_location(Value* vars, opcode which) {
       Value* idx2[] = {
-        ConstantInt::get(ls_->Int32Ty, 0),
-        ConstantInt::get(ls_->Int32Ty, offset::vars_tuple),
-        ConstantInt::get(ls_->Int32Ty, which)
+        cint(0),
+        cint(offset::vars_tuple),
+        cint(which)
       };
 
       return b().CreateGEP(vars, idx2, idx2+3, "local_pos");
@@ -1183,9 +1151,9 @@ namespace rubinius {
 
     void visit_push_local(opcode which) {
       Value* idx2[] = {
-        ConstantInt::get(ls_->Int32Ty, 0),
-        ConstantInt::get(ls_->Int32Ty, offset::vars_tuple),
-        ConstantInt::get(ls_->Int32Ty, which)
+        cint(0),
+        cint(offset::vars_tuple),
+        cint(which)
       };
 
       Value* pos = b().CreateGEP(vars_, idx2, idx2+3, "local_pos");
@@ -1239,9 +1207,9 @@ namespace rubinius {
 
     void visit_set_local(opcode which) {
       Value* idx2[] = {
-        ConstantInt::get(ls_->Int32Ty, 0),
-        ConstantInt::get(ls_->Int32Ty, offset::vars_tuple),
-        ConstantInt::get(ls_->Int32Ty, which)
+        cint(0),
+        cint(offset::vars_tuple),
+        cint(which)
       };
 
       Value* pos = b().CreateGEP(vars_, idx2, idx2+3, "local_pos");
@@ -1268,7 +1236,7 @@ namespace rubinius {
           ary_size = (int)inline_args->size() - block_arg_shift_;
         }
 
-        outgoing_args.push_back(ConstantInt::get(ls_->Int32Ty, ary_size));
+        outgoing_args.push_back(cint(ary_size));
 
         if(ary_size > 0) {
           for(size_t i = block_arg_shift_; i < inline_args->size(); i++) {
@@ -1368,6 +1336,7 @@ namespace rubinius {
       sig << ls_->Int32Ty;
       sig << ls_->IntPtrTy;
       sig << "CallFrame";
+      sig << ls_->VoidPtrTy;
       sig << ls_->Int32Ty;
       sig << llvm::PointerType::getUnqual(ls_->Int32Ty);
 
@@ -1381,11 +1350,12 @@ namespace rubinius {
         cint(current_ip_),
         sp,
         root_callframe,
+        constant(info().context().runtime_data_holder(), ls_->VoidPtrTy),
         cint(unwinds),
         info().unwind_info()
       };
 
-      Value* call = sig.call("rbx_continue_uncommon", call_args, 7, "", b());
+      Value* call = sig.call("rbx_continue_uncommon", call_args, 8, "", b());
 
       info().add_return_value(call, current_block());
       b().CreateBr(info().return_pad());
@@ -1402,7 +1372,7 @@ namespace rubinius {
         Value* obj = stack_back(0);
 
         type::KnownType kt = type::KnownType::extract(state(), obj);
-        if(kt.instance_p()) {
+        if(kt.instance_p() && !kt.singleton_instance_p()) {
           if(state()->config().jit_inline_debug) {
             context().inline_log("inlining") << "direct class of reference\n";
           }
@@ -1454,7 +1424,7 @@ namespace rubinius {
       Value* call_args[] = { vm_, call_frame_, arg_ary, cint(args) };
 
       Value* ptr = b().CreateIntToPtr(
-          ConstantInt::get(ls_->IntPtrTy, reinterpret_cast<uintptr_t>(invoker)),
+          clong(reinterpret_cast<uintptr_t>(invoker)),
           llvm::PointerType::getUnqual(sig.type()));
 
       Value* call = b().CreateCall(ptr, call_args, call_args + 4, "invoked_prim");
@@ -1612,7 +1582,7 @@ namespace rubinius {
           Value* call_args[] = {
             vm_,
             creator->call_frame(),
-            ConstantInt::get(ls_->Int32Ty, ib->which())
+            cint(ib->which())
           };
 
           Value* blk = sig.call("rbx_create_block", call_args, 3,
@@ -1661,7 +1631,7 @@ namespace rubinius {
         std::vector<Value*> call_args;
         call_args.push_back(vm_);
         call_args.push_back(get_literal(which));
-        call_args.push_back(ConstantInt::get(ls_->Int32Ty, which));
+        call_args.push_back(cint(which));
 
         std::vector<JITMethodInfo*> mis;
 
@@ -1671,7 +1641,7 @@ namespace rubinius {
           nfo = nfo->creator_info();
         }
 
-        call_args.push_back(ConstantInt::get(ls_->Int32Ty, mis.size()));
+        call_args.push_back(cint(mis.size()));
 
         for(std::vector<JITMethodInfo*>::reverse_iterator i = mis.rbegin();
             i != mis.rend();
@@ -1697,7 +1667,7 @@ namespace rubinius {
       Value* call_args[] = {
         vm_,
         call_frame_,
-        ConstantInt::get(ls_->Int32Ty, which)
+        cint(which)
       };
 
       if(push) {
@@ -2078,7 +2048,7 @@ use_send:
         Value* global_serial = b().CreateLoad(global_serial_pos, "global_serial");
 
         Value* current_serial_pos = b().CreateIntToPtr(
-            ConstantInt::get(ls_->IntPtrTy, (intptr_t)entry->serial_location()),
+            clong((intptr_t)entry->serial_location()),
             llvm::PointerType::getUnqual(ls_->IntPtrTy), "cast_to_intptr");
 
         Value* current_serial = b().CreateLoad(current_serial_pos, "serial");
@@ -2094,7 +2064,7 @@ use_send:
         set_block(use_cache);
 
         Value* value_pos = b().CreateIntToPtr(
-            ConstantInt::get(ls_->IntPtrTy, (intptr_t)entry->value_location()),
+            clong((intptr_t)entry->value_location()),
             llvm::PointerType::getUnqual(ObjType), "cast_to_objptr");
 
         cached_value = b().CreateLoad(value_pos, "cached_value");
@@ -2125,7 +2095,7 @@ use_send:
         vm_,
         call_frame_,
         constant(as<Symbol>(literal(name))),
-        ConstantInt::get(ls_->Int32Ty, cache)
+        cint(cache)
       };
 
       CallInst* ret = b().CreateCall(func, call_args, call_args+4,
@@ -2242,7 +2212,7 @@ use_send:
       Value* call_args[] = {
         vm_,
         call_frame_,
-        ConstantInt::get(ls_->Int32Ty, which),
+        cint(which),
         stack_top()
       };
 
@@ -2313,7 +2283,7 @@ use_send:
 
           std::vector<Value*> outgoing_args;
           outgoing_args.push_back(vm());
-          outgoing_args.push_back(ConstantInt::get(ls_->Int32Ty, inline_args->size()));
+          outgoing_args.push_back(cint(inline_args->size()));
 
           for(size_t i = 0; i < inline_args->size(); i++) {
             outgoing_args.push_back(inline_args->at(i));
@@ -2359,7 +2329,7 @@ use_send:
           std::vector<Value*> outgoing_args;
           outgoing_args.push_back(vm());
           outgoing_args.push_back(call_frame_);
-          outgoing_args.push_back(ConstantInt::get(ls_->Int32Ty, inline_args->size()));
+          outgoing_args.push_back(cint(inline_args->size()));
 
           for(size_t i = 0; i < inline_args->size(); i++) {
             outgoing_args.push_back(inline_args->at(i));
@@ -2408,7 +2378,7 @@ use_send:
 
           std::vector<Value*> outgoing_args;
           outgoing_args.push_back(vm());
-          outgoing_args.push_back(ConstantInt::get(ls_->Int32Ty, inline_args->size()));
+          outgoing_args.push_back(cint(inline_args->size()));
 
           for(size_t i = 0; i < inline_args->size(); i++) {
             outgoing_args.push_back(inline_args->at(i));
@@ -2419,7 +2389,7 @@ use_send:
 
           Value* outargs2[] = {
             vm(),
-            ConstantInt::get(ls_->Int32Ty, 1),
+            cint(1),
             ary
           };
 
@@ -2438,7 +2408,7 @@ use_send:
           std::vector<Value*> outgoing_args;
           outgoing_args.push_back(vm());
           outgoing_args.push_back(call_frame_);
-          outgoing_args.push_back(ConstantInt::get(ls_->Int32Ty, inline_args->size()));
+          outgoing_args.push_back(cint(inline_args->size()));
 
           for(size_t i = 0; i < inline_args->size(); i++) {
             outgoing_args.push_back(inline_args->at(i));
@@ -2493,8 +2463,8 @@ use_send:
 
           /*
           Value* idx[] = {
-            ConstantInt::get(ls_->Int32Ty, 0),
-            ConstantInt::get(ls_->Int32Ty, offset::vars_parent)
+            cint(0),
+            cint(offset::vars_parent)
           };
 
           Value* varscope = b().CreateLoad(
@@ -2512,8 +2482,8 @@ use_send:
             vm_,
             nfo->call_frame(),
             stack_top(),
-            ConstantInt::get(ls_->Int32Ty, depth),
-            ConstantInt::get(ls_->Int32Ty, index)
+            cint(depth),
+            cint(index)
           };
 
           Value* val = sig.call("rbx_set_local_from", call_args, 5, "vs_uplocal", b());
@@ -2529,8 +2499,8 @@ use_send:
       /*
       else if(depth == 1) {
         Value* idx[] = {
-          ConstantInt::get(ls_->Int32Ty, 0),
-          ConstantInt::get(ls_->Int32Ty, offset::vars_parent)
+          cint(0),
+          cint(offset::vars_parent)
         };
 
         Value* gep = b().CreateGEP(vars_, idx, idx+2, "parent_pos");
@@ -2559,8 +2529,8 @@ use_send:
         vm_,
         call_frame_,
         stack_pop(),
-        ConstantInt::get(ls_->Int32Ty, depth),
-        ConstantInt::get(ls_->Int32Ty, index)
+        cint(depth),
+        cint(index)
       };
 
       Value* val = b().CreateCall(func, call_args, call_args+5, "sld");
@@ -2605,8 +2575,8 @@ use_send:
 
           /*
           Value* idx[] = {
-            ConstantInt::get(ls_->Int32Ty, 0),
-            ConstantInt::get(ls_->Int32Ty, offset::vars_parent)
+            cint(0),
+            cint(offset::vars_parent)
           };
 
           Value* varscope = b().CreateLoad(
@@ -2622,8 +2592,8 @@ use_send:
           Value* call_args[] = {
             vm_,
             nfo->call_frame(),
-            ConstantInt::get(ls_->Int32Ty, depth),
-            ConstantInt::get(ls_->Int32Ty, index)
+            cint(depth),
+            cint(index)
           };
 
           Value* val =
@@ -2643,8 +2613,8 @@ use_send:
       /*
       else if(depth == 1) {
         Value* idx[] = {
-          ConstantInt::get(ls_->Int32Ty, 0),
-          ConstantInt::get(ls_->Int32Ty, offset::vars_parent)
+          cint(0),
+          cint(offset::vars_parent)
         };
 
         Value* gep = b().CreateGEP(vars_, idx, idx+2, "parent_pos");
@@ -2670,8 +2640,8 @@ use_send:
       Value* call_args[] = {
         vm_,
         call_frame_,
-        ConstantInt::get(ls_->Int32Ty, depth),
-        ConstantInt::get(ls_->Int32Ty, index)
+        cint(depth),
+        cint(index)
       };
 
       Value* val = b().CreateCall(func, call_args, call_args+4, "pld");
@@ -2692,10 +2662,10 @@ use_send:
           cond, ls_->IntPtrTy, "as_int");
 
       Value* anded = b().CreateAnd(i,
-          ConstantInt::get(ls_->IntPtrTy, FALSE_MASK), "and");
+          clong(FALSE_MASK), "and");
 
       Value* cmp = b().CreateICmpNE(anded,
-          ConstantInt::get(ls_->IntPtrTy, cFalse), "is_true");
+          clong(cFalse), "is_true");
 
       BasicBlock* cont = new_block("continue");
       BasicBlock* bb = block_map_[ip].block;
@@ -2711,10 +2681,10 @@ use_send:
           cond, ls_->IntPtrTy, "as_int");
 
       Value* anded = b().CreateAnd(i,
-          ConstantInt::get(ls_->IntPtrTy, FALSE_MASK), "and");
+          clong(FALSE_MASK), "and");
 
       Value* cmp = b().CreateICmpEQ(anded,
-          ConstantInt::get(ls_->IntPtrTy, cFalse), "is_true");
+          clong(cFalse), "is_true");
 
       BasicBlock* cont = new_block("continue");
       BasicBlock* bb = block_map_[ip].block;
@@ -2792,7 +2762,7 @@ use_send:
         vm_,
         call_frame_,
         block_obj,
-        ConstantInt::get(ls_->Int32Ty, count),
+        cint(count),
         stack_objects(count)
       };
 
@@ -2823,7 +2793,7 @@ use_send:
         vm_,
         call_frame_,
         block_obj,
-        ConstantInt::get(ls_->Int32Ty, count),
+        cint(count),
         stack_objects(count + 1)
       };
 
@@ -2869,14 +2839,14 @@ use_send:
       sig << "Object";
 
       Value* cache_const = b().CreateIntToPtr(
-          ConstantInt::get(ls_->IntPtrTy, index),
+          clong(index),
           ptr_type("InlineCache"), "cast_to_ptr");
 
       Value* call_args[] = {
         vm_,
         call_frame_,
         cache_const,
-        ConstantInt::get(ls_->Int32Ty, serial),
+        cint(serial),
         stack_pop()
       };
 
@@ -2894,14 +2864,14 @@ use_send:
       sig << "Object";
 
       Value* cache_const = b().CreateIntToPtr(
-          ConstantInt::get(ls_->IntPtrTy, index),
+          clong(index),
           ptr_type("InlineCache"), "cast_to_ptr");
 
       Value* call_args[] = {
         vm_,
         call_frame_,
         cache_const,
-        ConstantInt::get(ls_->Int32Ty, serial),
+        cint(serial),
         stack_pop()
       };
 
@@ -2917,8 +2887,8 @@ use_send:
       }
 
       Value* idx[] = {
-        ConstantInt::get(ls_->Int32Ty, 0),
-        ConstantInt::get(ls_->Int32Ty, offset::vars_self)
+        cint(0),
+        cint(offset::vars_self)
       };
 
       Value* pos = b().CreateGEP(vars_, idx, idx+2, "self_pos");
@@ -2932,7 +2902,7 @@ use_send:
           llvm::PointerType::getUnqual(ObjType), "obj_array");
 
       Value* idx2[] = {
-        ConstantInt::get(ls_->Int32Ty, i / sizeof(Object*))
+        cint(i / sizeof(Object*))
       };
 
       pos = b().CreateGEP(cst, idx2, idx2+1, "field_pos");
@@ -3159,13 +3129,14 @@ use_send:
       Value* call_args[] = {
         vm_,
         call_frame_,
-        ConstantInt::get(ls_->Int32Ty, which),
+        cint(which),
         stack_pop()
       };
 
       flush();
 
       Value* val = sig.call("rbx_find_const", call_args, 4, "constant", b());
+      check_for_exception(val);
       stack_push(val);
     }
 
@@ -3179,11 +3150,12 @@ use_send:
       Value* top = stack_pop();
       Value* call_args[] = {
         vm_,
+        call_frame_,
         top,
         stack_pop()
       };
 
-      Value* val = sig.call("rbx_instance_of", call_args, 3, "constant", b());
+      Value* val = sig.call("rbx_instance_of", call_args, 4, "constant", b());
       stack_push(val);
     }
 
@@ -3266,7 +3238,7 @@ use_send:
 
       Value* call_args[] = {
         vm_,
-        ConstantInt::get(ls_->Int32Ty, count),
+        cint(count),
         stack_objects(count)
       };
 
@@ -3290,7 +3262,7 @@ use_send:
         Value* call_args[] = {
           vm_,
           call_frame_,
-          ConstantInt::get(ls_->Int32Ty, count),
+          cint(count),
           stack_objects(count + 1)
         };
 
@@ -3323,7 +3295,7 @@ use_send:
         Value* call_args[] = {
           vm_,
           args_,
-          ConstantInt::get(ls_->Int32Ty, count)
+          cint(count)
         };
 
         Value* val = sig.call("rbx_passed_arg", call_args, 3, "pa", b());
@@ -3341,7 +3313,7 @@ use_send:
       Value* call_args[] = {
         vm_,
         args_,
-        ConstantInt::get(ls_->Int32Ty, count)
+        cint(count)
       };
 
       Value* val = sig.call("rbx_passed_blockarg", call_args, 3, "pa", b());
@@ -3366,7 +3338,7 @@ use_send:
       // the actual values of which are the calling arguments
       Value* call_args[] = {
         vm_,
-        ConstantInt::get(ls_->Int32Ty, 2)
+        cint(2)
       };
 
       // call the function we just described using the builder
@@ -3381,7 +3353,7 @@ use_send:
 
         if(ls_->config().jit_inline_debug) {
           context().inline_log("inline ivar read")
-            << ls_->symbol_cstr(name);
+            << ls_->symbol_debug_str(name);
         }
 
         // Figure out if we should use the table ivar lookup or
@@ -3439,7 +3411,7 @@ use_send:
 
       if(ls_->config().jit_inline_debug) {
         context().inline_log("slow ivar read")
-          << ls_->symbol_cstr(name) << "\n";
+          << ls_->symbol_debug_str(name) << "\n";
       }
 
       Signature sig(ls_, ObjType);
@@ -3469,7 +3441,7 @@ use_send:
 
         if(ls_->config().jit_inline_debug) {
           context().inline_log("inline ivar write")
-            << ls_->symbol_cstr(name);
+            << ls_->symbol_debug_str(name);
         }
 
         // slot ivars (Array#@size for example) have type checks, so use the slow
@@ -3502,7 +3474,7 @@ use_send:
 
       if(ls_->config().jit_inline_debug) {
         context().inline_log("slow ivar write")
-          << ls_->symbol_cstr(name) << "\n";
+          << ls_->symbol_debug_str(name) << "\n";
       }
 
       set_has_side_effects();
@@ -3541,7 +3513,7 @@ use_send:
       Value* call_args[] = {
         vm_,
         self,
-        ConstantInt::get(ls_->Int32Ty, which)
+        cint(which)
       };
 
       Value* val = sig.call("rbx_push_my_field", call_args, 3, "field", b());
@@ -3564,7 +3536,7 @@ use_send:
       Value* call_args[] = {
         vm_,
         self,
-        ConstantInt::get(ls_->Int32Ty, which),
+        cint(which),
         stack_top()
       };
 
@@ -3612,11 +3584,12 @@ use_send:
 
       Value* call_args[] = {
         vm_,
+        call_frame_,
         val,
         stack_pop()
       };
 
-      Value* str = sig.call("rbx_string_append", call_args, 3, "string", b());
+      Value* str = sig.call("rbx_string_append", call_args, 4, "string", b());
       stack_push(str);
     }
 
@@ -3633,7 +3606,7 @@ use_send:
       Value* call_args[] = {
         vm_,
         call_frame_,
-        ConstantInt::get(ls_->Int32Ty, count),
+        cint(count),
         stack_objects(count)
       };
 

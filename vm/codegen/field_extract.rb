@@ -193,6 +193,10 @@ class CPPPrimitive < BasicPrimitive
       i += 1
     end
 
+    unless @safe
+      str << "  state->set_call_frame(call_frame);\n"
+    end
+
     args.unshift "recv" if @pass_self
     args.unshift "state" if @pass_state
 
@@ -707,7 +711,7 @@ Object* #{@name}::Info::get_field(STATE, Object* _t, size_t index) {
   switch(index) {
 #{generate_gets}  }
 
-  std::stringstream error;
+  std::ostringstream error;
   error << "Unable to access field " << index << " in a #{@name} instance";
 
   Exception::assertion_error(state, error.str().c_str());

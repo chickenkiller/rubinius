@@ -3,15 +3,27 @@
 
 #include "vm/config.h"
 
-#ifdef HAS_UCONTEXT
+#if defined(IS_X86)
+#define FIBER_ENABLED
+#define FIBER_NATIVE
+#define FIBER_ASM_X8632
+struct fiber_context_t;
+
+#elif defined(IS_X8664)
+#define FIBER_ENABLED
+#define FIBER_NATIVE
+#define FIBER_ASM_X8664
+struct fiber_context_t;
+
+#elif defined(HAS_UCONTEXT)
 #define FIBER_ENABLED
 #include <ucontext.h>
 typedef ucontext_t fiber_context_t;
+
 #else
-struct fiber_context_t {
-  int dummy;
-};
+struct fiber_context_t;
 #endif
+
 
 #include <signal.h>
 #include <stdio.h>

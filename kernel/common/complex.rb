@@ -1,5 +1,5 @@
 #
-#   complex.rb - 
+#   complex.rb -
 #   	$Release Version: 0.5 $
 #   	$Revision: 1.3 $
 #   	$Date: 1998/07/08 10:05:28 $
@@ -14,7 +14,7 @@
 # Complex numbers can be created in the following manner:
 # - <tt>Complex(a, b)</tt>
 # - <tt>Complex.polar(radius, theta)</tt>
-#   
+#
 # Additionally, note the following:
 # - <tt>Complex::I</tt> (the mathematical constant <i>i</i>)
 # - <tt>Numeric#im</tt> (e.g. <tt>5.im -> 0+5i</tt>)
@@ -38,14 +38,14 @@ class Numeric
   def im
     Complex(0, self)
   end
-  
+
   #
   # The real part of a complex number, i.e. <i>self</i>.
   #
   def real
     self
   end
-  
+
   #
   # The imaginary part of a complex number, i.e. 0.
   #
@@ -53,22 +53,23 @@ class Numeric
     0
   end
   alias imag image
-  
+
   #
   # See Complex#arg.
   #
   def arg
-    Math.atan2!(0, self)
+    Math.atan2(0, self)
   end
   alias angle arg
-  
+  alias phase arg
+
   #
   # See Complex#polar.
   #
   def polar
     return abs, arg
   end
-  
+
   #
   # See Complex#conjugate (short answer: returns <i>self</i>).
   #
@@ -114,15 +115,23 @@ class Complex < Numeric
   #
   # Creates a +Complex+ number in terms of +r+ (radius) and +theta+ (angle).
   #
-  def Complex.polar(r, theta)
+  def Complex.polar(r, theta=0)
+    raise TypeError, 'not a real' unless check_real?(r) && check_real?(theta)
+
     Complex(r*Math.cos(theta), r*Math.sin(theta))
   end
+
+  def Complex.check_real?(obj)
+    obj.kind_of?(Numeric) && obj.real?
+  end
+  private_class_method :check_real?
+
 
   #
   # Creates a +Complex+ number <tt>a</tt>+<tt>b</tt><i>i</i>.
   #
   def Complex.new!(a, b=0)
-    new(a,b)
+    new(a, b)
   end
 
   def initialize(a, b)
@@ -149,7 +158,7 @@ class Complex < Numeric
       x + y
     end
   end
-  
+
   #
   # Subtraction with real or complex number.
   #
@@ -165,7 +174,7 @@ class Complex < Numeric
       x - y
     end
   end
-  
+
   #
   # Multiplication with real or complex number.
   #
@@ -181,7 +190,7 @@ class Complex < Numeric
       x * y
     end
   end
-  
+
   #
   # Division by real or complex number.
   #
@@ -197,7 +206,7 @@ class Complex < Numeric
   end
 
   alias_method :/, :divide
-  
+
   def quo(other)
     Complex(@real.quo(1), @image.quo(1)) / other
   end
@@ -213,8 +222,8 @@ class Complex < Numeric
       r, theta = polar
       ore = other.real
       oim = other.image
-      nr = Math.exp!(ore*Math.log!(r) - oim * theta)
-      ntheta = theta*ore + oim*Math.log!(r)
+      nr = Math.exp(ore*Math.log(r) - oim * theta)
+      ntheta = theta*ore + oim*Math.log(r)
       Complex.polar(nr, ntheta)
     elsif other.kind_of?(Integer)
       if other > 0
@@ -246,7 +255,7 @@ class Complex < Numeric
       x**y
     end
   end
-  
+
   #
   # Remainder after division by a real or complex number.
   #
@@ -260,7 +269,7 @@ class Complex < Numeric
       x % y
     end
   end
-  
+
 #--
 #    def divmod(other)
 #      if other.kind_of?(Complex)
@@ -275,7 +284,7 @@ class Complex < Numeric
 #      end
 #    end
 #++
-  
+
   #
   # Absolute value (aka modulus): distance from the zero point on the complex
   # plane.
@@ -283,29 +292,31 @@ class Complex < Numeric
   def abs
     Math.hypot(@real, @image)
   end
-  
+
+  alias_method :magnitude, :abs
+
   #
   # Square of the absolute value.
   #
   def abs2
     @real*@real + @image*@image
   end
-  
+
   #
   # Argument (angle from (1,0) on the complex plane).
   #
   def arg
-    Math.atan2!(@image, @real)
+    Math.atan2(@image, @real)
   end
   alias angle arg
-  
+
   #
   # Returns the absolute value _and_ the argument.
   #
   def polar
     return abs, arg
   end
-  
+
   #
   # Complex conjugate (<tt>z + z.conjugate = 2 * z.real</tt>).
   #
@@ -313,14 +324,14 @@ class Complex < Numeric
     Complex(@real, -@image)
   end
   alias conj conjugate
-  
+
   #
   # Compares the absolute values of the two numbers.
   #
   def <=> (other)
     self.abs <=> other.abs
   end
-  
+
   #
   # Test for numerical equality (<tt>a == a + 0<i>i</i></tt>).
   #
@@ -351,7 +362,7 @@ class Complex < Numeric
   def denominator
     @real.denominator.lcm(@image.denominator)
   end
-  
+
   #
   # FIXME
   #
@@ -360,61 +371,69 @@ class Complex < Numeric
     Complex(@real.numerator*(cd/@real.denominator),
 	    @image.numerator*(cd/@image.denominator))
   end
-  
+
+  def rationalize(eps = nil)
+    raise RangeError, "non-zero imaginary part" unless @image.zero?
+
+    Rational(@real, 1)
+  end
+
+  def real?
+    false
+  end
+
+  def rect
+    return @real, @image
+  end
+
+  alias_method :rectangular, :rect
+
   #
   # Standard string representation of the complex number.
   #
   def to_s
-    if @real != 0
-      if defined?(Rational) and @image.kind_of?(Rational) and @image.denominator != 1
-	if @image >= 0
-	  @real.to_s+"+("+@image.to_s+")i"
-	else
-	  @real.to_s+"-("+(-@image).to_s+")i"
-	end
-      else
-	if @image >= 0
-	  @real.to_s+"+"+@image.to_s+"i"
-	else
-	  @real.to_s+"-"+(-@image).to_s+"i"
-	end
-      end
-    else
-      if defined?(Rational) and @image.kind_of?(Rational) and @image.denominator != 1
-	"("+@image.to_s+")i"
-      else
-	@image.to_s+"i"
-      end
-    end
+    signal = "+" unless @image < 0
+
+    "#{@real}#{signal}#{@image}i"
   end
-  
+
   #
   # Returns a hash code for the complex number.
   #
   def hash
     @real.hash ^ @image.hash
   end
-  
+
   #
   # Returns "<tt>Complex(<i>real</i>, <i>image</i>)</tt>".
   #
   def inspect
-    sprintf("Complex(%s, %s)", @real.inspect, @image.inspect)
+    "(#{to_s})"
   end
 
-  
+  #
+  # Divides each part of a <tt>Complex</tt> number as it is a float.
+  #
+  def fdiv(other)
+    raise TypeError, "#{other.class} can't be coerced into Complex" unless other.is_a?(Numeric)
+
+    # FIXME
+    super
+  end
+
   #
   # +I+ is the imaginary number.  It exists at point (0,1) on the complex plane.
   #
-  I = Complex(0,1)
-  
+  I = Complex(0, 1)
+
   # The real part of a complex number.
   attr_reader :real
 
   # The imaginary part of a complex number.
   attr_reader :image
   alias imag image
-  
+  alias imaginary image
+
 end
 
 class Integer
@@ -445,221 +464,5 @@ class Integer
   end
 
 end
-
-module Math
-  alias sqrt! sqrt
-  alias exp! exp
-  alias log! log
-  alias log10! log10
-  alias cos! cos
-  alias sin! sin
-  alias tan! tan
-  alias cosh! cosh
-  alias sinh! sinh
-  alias tanh! tanh
-  alias acos! acos
-  alias asin! asin
-  alias atan! atan
-  alias atan2! atan2
-  alias acosh! acosh
-  alias asinh! asinh
-  alias atanh! atanh  
-
-  # Redefined to handle a Complex argument.
-  def sqrt(z)
-    if Complex.generic?(z)
-      if z >= 0
-	sqrt!(z)
-      else
-	Complex(0,sqrt!(-z))
-      end
-    else
-      if z.image < 0
-	sqrt(z.conjugate).conjugate
-      else
-	r = z.abs
-	x = z.real
-	Complex( sqrt!((r+x)/2), sqrt!((r-x)/2) )
-      end
-    end
-  end
-  
-  # Redefined to handle a Complex argument.
-  def exp(z)
-    if Complex.generic?(z)
-      exp!(z)
-    else
-      Complex(exp!(z.real) * cos!(z.image), exp!(z.real) * sin!(z.image))
-    end
-  end
-  
-  # Redefined to handle a Complex argument.
-  def cos(z)
-    if Complex.generic?(z)
-      cos!(z)
-    else
-      Complex(cos!(z.real)*cosh!(z.image),
-	      -sin!(z.real)*sinh!(z.image))
-    end
-  end
-    
-  # Redefined to handle a Complex argument.
-  def sin(z)
-    if Complex.generic?(z)
-      sin!(z)
-    else
-      Complex(sin!(z.real)*cosh!(z.image),
-	      cos!(z.real)*sinh!(z.image))
-    end
-  end
-  
-  # Redefined to handle a Complex argument.
-  def tan(z)
-    if Complex.generic?(z)
-      tan!(z)
-    else
-      sin(z)/cos(z)
-    end
-  end
-
-  def sinh(z)
-    if Complex.generic?(z)
-      sinh!(z)
-    else
-      Complex( sinh!(z.real)*cos!(z.image), cosh!(z.real)*sin!(z.image) )
-    end
-  end
-
-  def cosh(z)
-    if Complex.generic?(z)
-      cosh!(z)
-    else
-      Complex( cosh!(z.real)*cos!(z.image), sinh!(z.real)*sin!(z.image) )
-    end
-  end
-
-  def tanh(z)
-    if Complex.generic?(z)
-      tanh!(z)
-    else
-      sinh(z)/cosh(z)
-    end
-  end
-  
-  # Redefined to handle a Complex argument.
-  def log(z)
-    if Complex.generic?(z) and z >= 0
-      log!(z)
-    else
-      r, theta = z.polar
-      Complex(log!(r.abs), theta)
-    end
-  end
-  
-  # Redefined to handle a Complex argument.
-  def log10(z)
-    if Complex.generic?(z)
-      log10!(z)
-    else
-      log(z)/log!(10)
-    end
-  end
-
-  def acos(z)
-    if Complex.generic?(z) and z >= -1 and z <= 1
-      acos!(z)
-    else
-      -1.0.im * log( z + 1.0.im * sqrt(1.0-z*z) )
-    end
-  end
-
-  def asin(z)
-    if Complex.generic?(z) and z >= -1 and z <= 1
-      asin!(z)
-    else
-      -1.0.im * log( 1.0.im * z + sqrt(1.0-z*z) )
-    end
-  end
-
-  def atan(z)
-    if Complex.generic?(z)
-      atan!(z)
-    else
-      1.0.im * log( (1.0.im+z) / (1.0.im-z) ) / 2.0
-    end
-  end
-
-  def atan2(y,x)
-    if Complex.generic?(y) and Complex.generic?(x)
-      atan2!(y,x)
-    else
-      -1.0.im * log( (x+1.0.im*y) / sqrt(x*x+y*y) )
-    end
-  end
-
-  def acosh(z)
-    if Complex.generic?(z) and z >= 1
-      acosh!(z)
-    else
-      log( z + sqrt(z*z-1.0) )
-    end
-  end
-
-  def asinh(z)
-    if Complex.generic?(z)
-      asinh!(z)
-    else
-      log( z + sqrt(1.0+z*z) )
-    end
-  end
-
-  def atanh(z)
-    if Complex.generic?(z) and z >= -1 and z <= 1
-      atanh!(z)
-    else
-      log( (1.0+z) / (1.0-z) ) / 2.0
-    end
-  end
-
-  module_function :sqrt!
-  module_function :sqrt
-  module_function :exp!
-  module_function :exp
-  module_function :log!
-  module_function :log
-  module_function :log10!
-  module_function :log10
-  module_function :cosh!
-  module_function :cosh
-  module_function :cos!
-  module_function :cos
-  module_function :sinh!
-  module_function :sinh
-  module_function :sin!
-  module_function :sin
-  module_function :tan!
-  module_function :tan
-  module_function :tanh!
-  module_function :tanh
-  module_function :acos!
-  module_function :acos
-  module_function :asin!
-  module_function :asin
-  module_function :atan!
-  module_function :atan
-  module_function :atan2!
-  module_function :atan2
-  module_function :acosh!
-  module_function :acosh
-  module_function :asinh!
-  module_function :asinh
-  module_function :atanh!
-  module_function :atanh
-  
+class Complex
 end
-
-# Documentation comments:
-#  - source: original (researched from pickaxe)
-#  - a couple of fixme's
-#  - RDoc output for Bignum etc. is a bit short, with nothing but an
-#    (undocumented) alias.  No big deal.

@@ -31,7 +31,7 @@
 #endif
 
 #ifdef ENABLE_LLVM
-#include "llvm/jit.hpp"
+#include "llvm/state.hpp"
 #endif
 
 /*
@@ -57,10 +57,7 @@ namespace rubinius {
     , uncommon_count(0)
     , number_of_caches_(0)
     , caches(0)
-#ifdef ENABLE_LLVM
-    , llvm_function_(NULL)
-    , jitted_impl_(NULL)
-#endif
+    , execute_status_(eInterpret)
     , name_(meth->name())
     , method_id_(state->shared.inc_method_count(state))
     , debugging(false)
@@ -92,6 +89,15 @@ namespace rubinius {
       call_count = 0;
     } else {
       call_count = -1;
+    }
+
+    unspecialized = 0;
+    fallback = 0;
+
+    for(int i = 0; i < cMaxSpecializations; i++) {
+      specializations[i].class_id = 0;
+      specializations[i].execute = 0;
+      specializations[i].jit_data = 0;
     }
 
     state->shared.om->add_code_resource(this);
@@ -498,41 +504,41 @@ namespace rubinius {
   }
 
   void VMMethod::setup_argument_handler(CompiledMethod* meth) {
+    // Firstly, use the generic case that handles all cases
+    fallback = &VMMethod::execute_specialized<GenericArguments>;
+
     // If there are no optionals, only a fixed number of positional arguments.
     if(total_args == required_args) {
       // if no arguments are expected
       if(total_args == 0) {
         // and there is no splat, use the fastest case.
         if(splat_position == -1) {
-          meth->set_executor(&VMMethod::execute_specialized<NoArguments>);
+          fallback = &VMMethod::execute_specialized<NoArguments>;
 
         // otherwise use the splat only case.
         } else {
-          meth->set_executor(&VMMethod::execute_specialized<SplatOnlyArgument>);
+          fallback = &VMMethod::execute_specialized<SplatOnlyArgument>;
         }
-        return;
-
       // Otherwise use the few specialized cases iff there is no splat
       } else if(splat_position == -1) {
         switch(total_args) {
         case 1:
-          meth->set_executor(&VMMethod::execute_specialized<OneArgument>);
-          return;
+          fallback= &VMMethod::execute_specialized<OneArgument>;
+          break;
         case 2:
-          meth->set_executor(&VMMethod::execute_specialized<TwoArguments>);
-          return;
+          fallback = &VMMethod::execute_specialized<TwoArguments>;
+          break;
         case 3:
-          meth->set_executor(&VMMethod::execute_specialized<ThreeArguments>);
-          return;
+          fallback = &VMMethod::execute_specialized<ThreeArguments>;
+          break;
         default:
-          meth->set_executor(&VMMethod::execute_specialized<FixedArguments>);
-          return;
+          fallback = &VMMethod::execute_specialized<FixedArguments>;
+          break;
         }
       }
     }
 
-    // Lastly, use the generic case that handles all cases
-    meth->set_executor(&VMMethod::execute_specialized<GenericArguments>);
+    meth->set_executor(fallback);
   }
 
   /* This is the execute implementation used by normal Ruby code,
@@ -691,36 +697,63 @@ namespace rubinius {
 
   // If +disable+ is set, then the method is tagged as not being
   // available for JIT.
-  void VMMethod::deoptimize(STATE, CompiledMethod* original, bool disable) {
-#ifdef ENABLE_LLVM
-    if(jitted_impl_) {
-      // This resets execute to use the interpreter
-      setup_argument_handler(original);
+  void VMMethod::deoptimize(STATE, CompiledMethod* original,
+                            jit::RuntimeDataHolder* rd, 
+                            bool disable)
+  {
+    LLVMState* ls = LLVMState::get(state);
+    ls->start_method_update();
 
-      // Don't call LLVMState::get(state)->remove(llvm_function_)
-      // here. We let the CodeManager do that later, when we're sure
-      // the llvm function is no longer used.
-      llvm_function_ = 0;
+    bool still_others = false;
 
-      jitted_impl_ = 0;
-
-      if(disable) {
-        jitted_bytes_ = -1;
-      } else {
-        jitted_bytes_ = 0;
+    for(int i = 0; i < cMaxSpecializations; i++) {
+      if(!rd) {
+        specializations[i].class_id = 0;
+        specializations[i].execute = 0;
+        specializations[i].jit_data = 0;
+      } else if(specializations[i].jit_data == rd) {
+        specializations[i].class_id = 0;
+        specializations[i].execute = 0;
+        specializations[i].jit_data = 0;
+      } else if(specializations[i].jit_data) {
+        still_others = true;
       }
+    }
 
-      // Remove any JIT data, which will be cleanup by the CodeManager
-      // later.
+    if(!rd || original->jit_data() == rd) {
+      unspecialized = 0;
       original->set_jit_data(0);
     }
 
-    if(disable) {
-      call_count = -1;
-    } else {
-      call_count = 0;
+    if(original->jit_data()) still_others = true;
+
+    if(!still_others) {
+      execute_status_ = eInterpret;
+
+      // This resets execute to use the interpreter
+      original->set_executor(fallback);
     }
-#endif
+
+    if(disable) {
+      execute_status_ = eJITDisable;
+      original->set_executor(fallback);
+    } else if(execute_status_ == eJITDisable && still_others) {
+      execute_status_ = eJIT;
+    }
+
+    if(original->execute == CompiledMethod::specialized_executor) {
+      bool found = false;
+
+      for(int i = 0; i < cMaxSpecializations; i++) {
+        if(specializations[i].execute) found = true;
+      }
+
+      if(unspecialized) found = true;
+
+      if(!found) rubinius::bug("no specializations!");
+    }
+
+    ls->end_method_update();
   }
 
   /*

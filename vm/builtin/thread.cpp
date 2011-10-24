@@ -20,6 +20,8 @@
 #include "vm/object_utils.hpp"
 #include "vm.hpp"
 
+#include "on_stack.hpp"
+
 #include "windows_compat.h"
 
 #include <sys/time.h>
@@ -175,6 +177,14 @@ namespace rubinius {
     return Qnil;
   }
 
+  int Thread::fork_attached(STATE) {
+    pthread_attr_t attrs;
+    pthread_attr_init(&attrs);
+    pthread_attr_setstacksize(&attrs, 4194304);
+
+    return pthread_create(&vm_->os_thread(), &attrs, in_new_thread, (void*)vm_);
+  }
+
   Object* Thread::pass(STATE, CallFrame* calling_environment) {
     struct timespec ts = {0, 0};
     nanosleep(&ts, NULL);
@@ -195,6 +205,8 @@ namespace rubinius {
   }
 
   Object* Thread::raise(STATE, Exception* exc) {
+    OnStack<1> os(state, exc);
+
     thread::SpinLock::LockGuard lg(init_lock_);
 
     VM* vm = vm_;

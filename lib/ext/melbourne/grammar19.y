@@ -567,6 +567,7 @@ program         : {
                     }
                     top_node = block_append(top_node, $2);
                     class_nest = 0;
+                    local_pop();
                   }
                 ;
 
@@ -5976,7 +5977,7 @@ parser_shadowing_lvar(rb_parser_state* parser_state, ID name)
     if(bv_var(name)) {
       yy_error("duplicate argument name");
     } else if(bv_defined(name) || local_id(name)) {
-      rb_warningS("shadowing outer local variable - %s", quark_to_string(name));
+      rb_warningS("shadowing outer local variable - %s", parser_id2name(name));
       vtable_add(locals_table->vars, name);
     }
   } else {

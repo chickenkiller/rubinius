@@ -69,7 +69,7 @@
 #include "gc/walker.hpp"
 
 #ifdef ENABLE_LLVM
-#include "llvm/jit.hpp"
+#include "llvm/state.hpp"
 #include "llvm/jit_compiler.hpp"
 #endif
 
@@ -226,7 +226,7 @@ namespace rubinius {
     LLVMState::start(state);
 #endif
 
-    SignalHandler::on_fork();
+    SignalHandler::on_fork(state, false);
 
     /* execvp() returning means it failed. */
     Exception::errno_error(state, "execvp(2) failed");
@@ -437,7 +437,7 @@ namespace rubinius {
 
       state->shared.reinit(state);
 
-      SignalHandler::on_fork();
+      SignalHandler::on_fork(state, false);
       state->shared.om->on_fork();
 
       // Re-initialize LLVM
@@ -745,9 +745,9 @@ namespace rubinius {
       if(cls->true_superclass(state) != super) {
         std::ostringstream message;
         message << "Superclass mismatch: given "
-                << as<Module>(super)->name()->c_str(state)
+                << as<Module>(super)->name()->debug_str(state)
                 << " but previously set to "
-                << cls->true_superclass(state)->name()->c_str(state);
+                << cls->true_superclass(state)->name()->debug_str(state);
 
         Exception* exc =
           Exception::make_type_error(state, Class::type, super,
@@ -921,7 +921,7 @@ namespace rubinius {
 
     VMMethod* vmm = env->vmmethod(state);
 
-    jit::Compiler jit;
+    jit::Compiler jit(ls);
     jit.compile_block(ls, env->code(), vmm);
 
     if(show->true_p()) {
@@ -953,7 +953,7 @@ namespace rubinius {
     while(obj) {
       if(CompiledMethod* cm = try_as<CompiledMethod>(obj)) {
         if(VMMethod* vmm = cm->backend_method()) {
-          vmm->deoptimize(state, cm, disable);
+          vmm->deoptimize(state, cm, 0, disable);
         }
         total++;
       }
@@ -1497,7 +1497,7 @@ namespace rubinius {
     return m;
   }
 
-  Fixnum* System::vm_hash_trie_entry_index(STATE, Fixnum* hash,
+  Fixnum* System::vm_hash_trie_item_index(STATE, Fixnum* hash,
                                            Fixnum* level, Integer* map)
   {
     size_t m = map->to_ulong();

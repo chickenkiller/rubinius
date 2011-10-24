@@ -33,7 +33,7 @@ end
 require config_rb
 BUILD_CONFIG = Rubinius::BUILD_CONFIG
 
-unless BUILD_CONFIG[:config_version] == 138
+unless BUILD_CONFIG[:config_version] == 139
   STDERR.puts "Your configuration is outdated, please run ./configure first"
   exit 1
 end
@@ -97,12 +97,12 @@ def run_specs(flags=nil)
     ENV["CFLAGS"]      = "-Ivm/capi"
   end
 
+  ENV.delete("RUBYOPT")
+
   sh "bin/mspec ci #{ENV['CI_MODE_FLAG'] || flags} --background --agent"
 end
 
-task :default => %w[build vm:test] do
-  run_specs
-end
+task :default => :spec
 
 task :github do
   cur = `git config remote.origin.url`.strip
@@ -132,26 +132,26 @@ def run_ci
 end
 
 desc "Run CI in default (configured) mode"
-task :ci do
+task :ci => %w[build vm:test] do
   run_ci
 end
 
 # These tasks run the specs in the specified mode regardless of
 # the default mode with which Rubinius was configured.
 desc "Run CI in 1.8 mode"
-task :ci18 do
-  ENV['CI_MODE_FLAG'] = "-T -X19=no"
+task :ci18 => %w[build vm:test] do
+  ENV['CI_MODE_FLAG'] = "-T -X18"
   run_ci
 end
 
 desc "Run CI in 1.9 mode"
-task :ci19 do
+task :ci19 => %w[build vm:test] do
   ENV['CI_MODE_FLAG'] = "-T -X19"
   run_ci
 end
 
 desc "Run CI in 2.0 mode"
-task :ci20 do
+task :ci20 => %w[build vm:test] do
   ENV['CI_MODE_FLAG'] = "-T -X20"
   run_ci
 end
@@ -202,24 +202,22 @@ task :docs do
 end
 
 desc "Run the CI specs in 1.8 mode but do not rebuild on failure"
-task :spec18 do
-  run_specs "-T -X19=no"
+task :spec18 => %w[build vm:test] do
+  run_specs "-T -X18"
 end
 
 desc "Run the CI specs in 1.9 mode but do not rebuild on failure"
-task :spec19 do
+task :spec19 => %w[build vm:test] do
   run_specs "-T -X19"
 end
 
 desc "Run the CI specs in 2.0 mode but do not rebuild on failure"
-task :spec20 do
+task :spec20 => %w[build vm:test] do
   run_specs "-T -X20"
 end
 
 desc "Run CI in default (configured) mode but do not rebuild on failure"
-task :spec do
-  run_specs
-end
+task :spec => %w[spec18 spec19]
 
 desc "Print list of items marked to-do in kernel/ (@todo|TODO)"
 task :todos do
@@ -232,68 +230,6 @@ task :todos do
     File.open(filename) do |file|
       file.each do |line|
         puts "#{filename} #{file.lineno.to_s}:\t#{line.strip}" if line.include?("@todo") or line.include?("TODO")
-      end
-    end
-  end
-end
-
-
-# shell command for quarterly list of committers
-def quarterly_committers(start_month, year=Time.now.year)
-  "git log --since='#{start_month}/1/#{year}' --until='#{start_month + 2}/31/#{year}' | git shortlog -n -s"
-end
-
-def future?(start_month, year=Time.now.year)
-  require "date"
-
-  if Date.parse("#{start_month}/1/#{year}") > Date.today
-    puts
-    puts "ERROR: That's the future!"
-    puts
-    true
-  elsif year < Time.now.year
-    false
-  else Date.parse("#{start_month + 2}/28/#{year}") > Date.today
-    puts
-    puts "WARNING: That's the current quarter."
-    puts
-  end
-end
-
-namespace :committers do
-  desc "Prints list of committers from first calendar quarter of this year"
-  task :q1 do
-    unless future?(1)
-      sh quarterly_committers(1)
-    end
-  end
-
-  desc "Prints list of committers from second calendar quarter of this year"
-  task :q2 do
-    unless future?(4)
-      sh quarterly_committers(4)
-    end
-  end
-
-  desc "Prints list of committers from third calendar quarter of this year"
-  task :q3 do
-    unless future?(7)
-      sh quarterly_committers(7)
-    end
-  end
-
-  desc "Prints list of committers from fourth calendar quarter of this year"
-  task :q4 do
-    unless future?(10)
-      sh quarterly_committers(10)
-    end
-  end
-
-  namespace :q4 do
-    desc "Prints list of committers from fourth calendar quarter of LAST year"
-    task :last_year do
-      unless future?(10, Time.now.year - 1)
-        sh quarterly_committers(10, Time.now.year - 1)
       end
     end
   end

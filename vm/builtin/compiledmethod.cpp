@@ -28,7 +28,7 @@
 #include "instruments/timing.hpp"
 
 #ifdef ENABLE_LLVM
-#include "llvm/jit.hpp"
+#include "llvm/state.hpp"
 #include "llvm/jit_compiler.hpp"
 #include "llvm/jit_runtime.hpp"
 #endif
@@ -119,7 +119,9 @@ namespace rubinius {
 
         vmm = new VMMethod(state, this);
 
-        if(!resolve_primitive(state)) {
+        if(resolve_primitive(state)) {
+          vmm->fallback = execute;
+        } else {
           vmm->setup_argument_handler(this);
         }
 
@@ -173,6 +175,108 @@ namespace rubinius {
     return cm->execute(state, call_frame, exec, mod, args);
   }
 
+  Object* CompiledMethod::specialized_executor(STATE, CallFrame* call_frame,
+                          Executable* exec, Module* mod, Arguments& args)
+  {
+    CompiledMethod* cm = as<CompiledMethod>(exec);
+
+    Class* cls = args.recv()->class_object(state);
+    int id = cls->class_id();
+
+    VMMethod* v = cm->backend_method();
+
+    executor target = v->unspecialized;
+
+    for(int i = 0; i < VMMethod::cMaxSpecializations; i++) {
+      int c_id = v->specializations[i].class_id;
+      executor x = v->specializations[i].execute;
+
+      if(c_id == id && x != 0) {
+        target = x;
+        break;
+      }
+    }
+
+    // This is a bug. We should not have this setup if there are no
+    // specializations. FIX THIS BUG!
+    if(!target) target = v->fallback;
+
+    return target(state, call_frame, exec, mod, args);
+  }
+
+  bool CompiledMethod::can_specialize_p() {
+    if(!backend_method_) rubinius::bug("specializing with no backend");
+
+    for(int i = 0; i < VMMethod::cMaxSpecializations; i++) {
+      if(backend_method_->specializations[i].class_id == 0) return true;
+    }
+
+    return false;
+  }
+
+  void CompiledMethod::set_unspecialized(executor exec, jit::RuntimeDataHolder* rd) {
+    if(!backend_method_) rubinius::bug("specializing with no backend");
+
+    backend_method_->set_execute_status(VMMethod::eJIT);
+
+    jit_data_ = rd;
+    backend_method_->unspecialized = exec;
+
+    // See if we can also just make this the normal execute
+    for(int i = 0; i < VMMethod::cMaxSpecializations; i++) {
+      if(backend_method_->specializations[i].class_id > 0) return;
+    }
+
+    execute = exec;
+  }
+
+  void CompiledMethod::add_specialized(int spec_id, executor exec,
+                                       jit::RuntimeDataHolder* rd)
+  {
+    if(!backend_method_) rubinius::bug("specializing with no backend");
+
+    VMMethod* v = backend_method_;
+
+    // Must happen only on the first specialization
+    if(!v->unspecialized) {
+      if(execute == specialized_executor) {
+        rubinius::bug("cant setup unspecialized from specialized");
+      }
+
+      v->unspecialized = execute;
+    }
+
+    for(int i = 0; i < VMMethod::cMaxSpecializations; i++) {
+      int id = v->specializations[i].class_id;
+      if(id == 0 || id == spec_id) {
+        v->specializations[i].class_id = spec_id;
+        v->specializations[i].execute = exec;
+        v->specializations[i].jit_data = rd;
+
+        v->set_execute_status(VMMethod::eJIT);
+        execute = specialized_executor;
+        return;
+      }
+    }
+
+    // No room for the specialization, this is bad.
+    std::cerr << "No room for specialization!\n";
+  }
+
+  executor CompiledMethod::find_specialized(int spec_id) {
+    VMMethod* v = backend_method_;
+
+    if(!v) return 0;
+
+    for(int i = 0; i < VMMethod::cMaxSpecializations; i++) {
+      if(v->specializations[i].class_id == spec_id) {
+        return v->specializations[i].execute;
+      }
+    }
+
+    return 0;
+  }
+
   void CompiledMethod::post_marshal(STATE) {
   }
 
@@ -182,6 +286,11 @@ namespace rubinius {
 
   String* CompiledMethod::full_name(STATE) {
     return name_->to_str(state);
+  }
+
+  void CompiledMethod::set_interpreter(executor interp) {
+    set_executor(interp);
+    backend_method_->fallback = interp;
   }
 
   Object* CompiledMethod::set_breakpoint(STATE, Fixnum* ip, Object* bp) {
@@ -266,6 +375,14 @@ namespace rubinius {
       cm->jit_data()->set_mark();
       cm->jit_data()->mark_all(cm, mark);
     }
+
+
+    for(int i = 0; i < VMMethod::cMaxSpecializations; i++) {
+      if(vmm->specializations[i].jit_data) {
+        vmm->specializations[i].jit_data->set_mark();
+        vmm->specializations[i].jit_data->mark_all(cm, mark);
+      }
+    }
 #endif
 
     for(size_t i = 0; i < vmm->inline_cache_count(); i++) {
@@ -315,6 +432,12 @@ namespace rubinius {
     if(cm->jit_data()) {
       cm->jit_data()->visit_all(visit);
     }
+
+    for(int i = 0; i < VMMethod::cMaxSpecializations; i++) {
+      if(vmm->specializations[i].jit_data) {
+        vmm->specializations[i].jit_data->visit_all(visit);
+      }
+    }
 #endif
 
     for(size_t i = 0; i < vmm->inline_cache_count(); i++) {
@@ -354,13 +477,20 @@ namespace rubinius {
       std::cout << "yes\n";
 
 #ifdef ENABLE_LLVM
-      if(cm->backend_method_->llvm_function()) {
+      VMMethod* v = cm->backend_method();
+
+      for(int i = 0; i < VMMethod::cMaxSpecializations; i++) {
+        if(!v->specializations[i].jit_data) continue;
+
+        llvm::Function* func = v->specializations[i].jit_data->llvm_function();
+
         llvm::outs() << "<LLVM>\n"
-                     << *cm->backend_method_->llvm_function()
+                     << *func
                      << "</LLVM>\n<MachineCode>\n";
+
         LLVMState::show_machine_code(
-            cm->backend_method_->jitted_impl(),
-            cm->backend_method_->jitted_bytes());
+            v->specializations[i].jit_data->native_func(),
+            v->specializations[i].jit_data->native_size());
         llvm::outs() << "</MachineCode>\n";
       }
 #endif
