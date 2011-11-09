@@ -44,7 +44,7 @@ namespace rubinius {
   Object* object_watch = 0;
 
   /* ObjectMemory methods */
-  ObjectMemory::ObjectMemory(STATE, Configuration& config)
+  ObjectMemory::ObjectMemory(VM* state, Configuration& config)
     : young_(new BakerGC(this, config.gc_bytes))
     , mark_sweep_(new MarkSweepGC(this, config))
     , immix_(new ImmixGC(this))
@@ -56,6 +56,7 @@ namespace rubinius {
     , running_finalizers_(false)
     , added_finalizers_(false)
     , finalizer_thread_(state, nil<Thread>())
+    , shared_(state->shared)
 
     , collect_young_now(false)
     , collect_mature_now(false)
@@ -103,7 +104,9 @@ namespace rubinius {
 
   }
 
-  void ObjectMemory::on_fork() {
+  void ObjectMemory::on_fork(STATE) {
+    lock_init(state->vm());
+    contention_lock_.init();
     finalizer_lock_.init();
     finalizer_var_.init();
     finalizer_thread_.set(nil<Thread>());
@@ -115,7 +118,7 @@ namespace rubinius {
     // Double check we've got no id still after the lock.
     if(obj->object_id() > 0) return;
 
-    obj->set_object_id(state, state->om, ++last_object_id);
+    obj->set_object_id(state, state->memory(), ++last_object_id);
   }
 
   Integer* ObjectMemory::assign_object_id_ivar(STATE, Object* obj) {
@@ -124,7 +127,7 @@ namespace rubinius {
     if(id->nil_p()) {
       /* All references have an even object_id. last_object_id starts out at 0
        * but we don't want to use 0 as an object_id, so we just add before using */
-      id = Integer::from(state, ++state->om->last_object_id << TAG_REF_WIDTH);
+      id = Integer::from(state, ++state->memory()->last_object_id << TAG_REF_WIDTH);
       obj->set_ivar(state, G(sym_object_id), id);
     }
     return as<Integer>(id);
@@ -142,7 +145,7 @@ namespace rubinius {
     if(obj->inflated_header_p()) return false;
 
     InflatedHeader* ih = inflated_headers_->allocate(obj);
-    ih->initialize_mutex(state->thread_id(), count);
+    ih->initialize_mutex(state->vm()->thread_id(), count);
 
     if(!obj->set_inflated_header(ih)) {
       if(obj->inflated_header_p()) return false;
@@ -154,22 +157,23 @@ namespace rubinius {
     return true;
   }
 
-  LockStatus ObjectMemory::contend_for_lock(STATE, ObjectHeader* obj,
+  LockStatus ObjectMemory::contend_for_lock(STATE, GCToken gct, ObjectHeader* obj,
                                             bool* error, size_t us)
   {
     bool timed = false;
     bool timeout = false;
     struct timespec ts = {0,0};
 
+    OnStack<1> os(state, obj);
+
     {
-      thread::Mutex::LockGuard lg(contention_lock_);
+      GCLockGuard lg(state, gct, contention_lock_);
 
       // We want to lock obj, but someone else has it locked.
       //
       // If the lock is already inflated, no problem, just lock it!
 
       // Be sure obj is updated by the GC while we're waiting for it
-      OnStack<1> os(state, obj);
 
 step1:
       // Only contend if the header is thin locked.
@@ -188,7 +192,7 @@ step1:
       if(!obj->header.atomic_set(orig, new_val)) {
         if(new_val.f.meaning != eAuxWordLock) {
           if(cDebugThreading) {
-            std::cerr << "[LOCK " << state->thread_id()
+            std::cerr << "[LOCK " << state->vm()->thread_id()
               << " contend_for_lock error: not thin locked.]" << std::endl;
           }
           *error = true;
@@ -204,7 +208,7 @@ step1:
       // for the us to be told to retry.
 
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id() << " waiting on contention]" << std::endl;
+        std::cerr << "[LOCK " << state->vm()->thread_id() << " waiting on contention]" << std::endl;
       }
 
       if(us > 0) {
@@ -216,7 +220,7 @@ step1:
         ts.tv_nsec = (us % 1000000) * 1000;
       }
 
-      state->set_sleeping();
+      state->vm()->set_sleeping();
 
       while(!obj->inflated_header_p()) {
         GCIndependent gc_guard(state);
@@ -229,33 +233,33 @@ step1:
         }
 
         if(cDebugThreading) {
-          std::cerr << "[LOCK " << state->thread_id() << " notified of contention breakage]" << std::endl;
+          std::cerr << "[LOCK " << state->vm()->thread_id() << " notified of contention breakage]" << std::endl;
         }
 
         // Someone is interrupting us trying to lock.
-        if(state->check_local_interrupts) {
-          state->check_local_interrupts = false;
+        if(state->vm()->check_local_interrupts) {
+          state->vm()->check_local_interrupts = false;
 
-          if(!state->interrupted_exception()->nil_p()) {
+          if(!state->vm()->interrupted_exception()->nil_p()) {
             if(cDebugThreading) {
-              std::cerr << "[LOCK " << state->thread_id() << " detected interrupt]" << std::endl;
+              std::cerr << "[LOCK " << state->vm()->thread_id() << " detected interrupt]" << std::endl;
             }
 
-            state->clear_sleeping();
+            state->vm()->clear_sleeping();
             return eLockInterrupted;
           }
         }
       }
 
-      state->clear_sleeping();
+      state->vm()->clear_sleeping();
 
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id() << " contention broken]" << std::endl;
+        std::cerr << "[LOCK " << state->vm()->thread_id() << " contention broken]" << std::endl;
       }
 
       if(timeout) {
         if(cDebugThreading) {
-          std::cerr << "[LOCK " << state->thread_id() << " contention timed out]" << std::endl;
+          std::cerr << "[LOCK " << state->vm()->thread_id() << " contention timed out]" << std::endl;
         }
 
         return eLockTimeout;
@@ -273,14 +277,14 @@ step1:
     InflatedHeader* ih = obj->inflated_header();
 
     if(timed) {
-      return ih->lock_mutex_timed(state, &ts);
+      return ih->lock_mutex_timed(state, gct, &ts);
     } else {
-      return ih->lock_mutex(state);
+      return ih->lock_mutex(state, gct);
     }
   }
 
-  void ObjectMemory::release_contention(STATE) {
-    thread::Mutex::LockGuard lg(contention_lock_);
+  void ObjectMemory::release_contention(STATE, GCToken gct) {
+    GCLockGuard lg(state, gct, contention_lock_);
     contention_var_.broadcast();
   }
 
@@ -309,7 +313,7 @@ step1:
       break;
     case eAuxWordLock:
       // We have to locking the object to inflate it, thats the law.
-      if(tmp.f.aux_word >> cAuxLockTIDShift != state->thread_id()) {
+      if(tmp.f.aux_word >> cAuxLockTIDShift != state->vm()->thread_id()) {
         return false;
       }
 
@@ -317,7 +321,7 @@ step1:
       initial_count = orig.f.aux_word & cAuxLockRecCountMask;
     }
 
-    ih->initialize_mutex(state->thread_id(), initial_count + 1);
+    ih->initialize_mutex(state->vm()->thread_id(), initial_count + 1);
 
     tmp.all_flags = ih;
     tmp.f.meaning = eAuxWordInflated;
@@ -367,14 +371,14 @@ step1:
         break;
       case eAuxWordLock:
         // We have to be locking the object to inflate it, thats the law.
-        if(new_val.f.aux_word >> cAuxLockTIDShift != state->thread_id()) {
+        if(new_val.f.aux_word >> cAuxLockTIDShift != state->vm()->thread_id()) {
           if(cDebugThreading) {
-            std::cerr << "[LOCK " << state->thread_id() << " object locked by another thread while inflating for contention]" << std::endl;
+            std::cerr << "[LOCK " << state->vm()->thread_id() << " object locked by another thread while inflating for contention]" << std::endl;
           }
           return false;
         }
         if(cDebugThreading) {
-          std::cerr << "[LOCK " << state->thread_id() << " being unlocked and inflated atomicly]" << std::endl;
+          std::cerr << "[LOCK " << state->vm()->thread_id() << " being unlocked and inflated atomicly]" << std::endl;
         }
 
         ih = inflated_headers_->allocate(obj);
@@ -383,7 +387,7 @@ step1:
         break;
       case eAuxWordInflated:
         if(cDebugThreading) {
-          std::cerr << "[LOCK " << state->thread_id() << " asked to inflated already inflated lock]" << std::endl;
+          std::cerr << "[LOCK " << state->vm()->thread_id() << " asked to inflated already inflated lock]" << std::endl;
         }
         return false;
       }
@@ -397,7 +401,7 @@ step1:
       if(!obj->header.atomic_set(orig, new_val)) continue;
 
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id() << " inflated lock for contention.]" << std::endl;
+        std::cerr << "[LOCK " << state->vm()->thread_id() << " inflated lock for contention.]" << std::endl;
       }
 
       // Now inflated but not locked, which is what we want.
@@ -413,7 +417,7 @@ step1:
     if(Object* obj = young_->raw_allocate(bytes, &collect_young_now)) {
       gc_stats.young_object_allocated(bytes);
 
-      if(collect_young_now) root_state_->interrupts.set_perform_gc();
+      if(collect_young_now) shared_.gc_soon();
       obj->init_header(cls, YoungObjectZone, type);
       return obj;
     } else {
@@ -486,16 +490,16 @@ step1:
     return copy;
   }
 
-  void ObjectMemory::collect(STATE, CallFrame* call_frame) {
+  void ObjectMemory::collect(STATE, GCToken gct, CallFrame* call_frame) {
     // Don't go any further unless we're allowed to GC.
     if(!can_gc()) return;
 
     SYNC(state);
 
     // If we were checkpointed, then someone else ran the GC, just return.
-    if(state->shared.should_stop()) {
+    if(state->shared().should_stop()) {
       UNSYNC;
-      state->shared.checkpoint(state);
+      state->checkpoint(gct, call_frame);
       return;
     }
 
@@ -506,24 +510,24 @@ step1:
     // Stops all other threads, so we're only here by ourselves.
     //
     // First, ask them to stop.
-    state->shared.ask_for_stopage();
+    state->shared().ask_for_stopage();
 
     // Now unlock ObjectMemory so that they can spin to any checkpoints.
     UNSYNC;
 
     // Wait for them all to check in.
-    state->shared.stop_the_world(state);
+    state->stop_the_world();
 
     // Now we're alone, but we lock again just to safe.
     RESYNC;
 
-    GCData gc_data(state);
+    GCData gc_data(state->vm(), gct);
 
     collect_young(gc_data);
     collect_mature(gc_data);
 
     // Ok, we're good. Get everyone going again.
-    state->shared.restart_world(state);
+    state->restart_world();
     bool added = added_finalizers_;
     added_finalizers_ = false;
 
@@ -537,16 +541,16 @@ step1:
     }
   }
 
-  void ObjectMemory::collect_maybe(STATE, CallFrame* call_frame) {
+  void ObjectMemory::collect_maybe(STATE, GCToken gct, CallFrame* call_frame) {
     // Don't go any further unless we're allowed to GC.
     if(!can_gc()) return;
 
     SYNC(state);
 
     // If we were checkpointed, then someone else ran the GC, just return.
-    if(state->shared.should_stop()) {
+    if(state->shared().should_stop()) {
       UNSYNC;
-      state->shared.checkpoint(state);
+      state->checkpoint(gct, call_frame);
       return;
     }
 
@@ -557,30 +561,30 @@ step1:
     // Stops all other threads, so we're only here by ourselves.
     //
     // First, ask them to stop.
-    state->shared.ask_for_stopage();
+    state->shared().ask_for_stopage();
 
     // Now unlock ObjectMemory so that they can spin to any checkpoints.
     UNSYNC;
 
     // Wait for them all to check in.
-    state->shared.stop_the_world(state);
+    state->stop_the_world();
 
     // Now we're alone, but we lock again just to safe.
     RESYNC;
 
-    GCData gc_data(state);
+    GCData gc_data(state->vm(), gct);
 
     uint64_t start_time = 0;
 
     if(collect_young_now) {
-      if(state->shared.config.gc_show) {
+      if(state->shared().config.gc_show) {
         start_time = get_current_time();
       }
 
       YoungCollectStats stats;
 
 #ifdef RBX_PROFILER
-      if(unlikely(state->tooling())) {
+      if(unlikely(state->vm()->tooling())) {
         tooling::GCEntry method(state, tooling::GCYoung);
         collect_young(gc_data, &stats);
       } else {
@@ -590,7 +594,7 @@ step1:
       collect_young(gc_data, &stats);
 #endif
 
-      if(state->shared.config.gc_show) {
+      if(state->shared().config.gc_show) {
         uint64_t fin_time = get_current_time();
         int diff = (fin_time - start_time) / 1000000;
 
@@ -603,13 +607,13 @@ step1:
     if(collect_mature_now) {
       size_t before_kb = 0;
 
-      if(state->shared.config.gc_show) {
+      if(state->shared().config.gc_show) {
         start_time = get_current_time();
         before_kb = mature_bytes_allocated() / 1024;
       }
 
 #ifdef RBX_PROFILER
-      if(unlikely(state->tooling())) {
+      if(unlikely(state->vm()->tooling())) {
         tooling::GCEntry method(state, tooling::GCMature);
         collect_mature(gc_data);
       } else {
@@ -619,7 +623,7 @@ step1:
       collect_mature(gc_data);
 #endif
 
-      if(state->shared.config.gc_show) {
+      if(state->shared().config.gc_show) {
         uint64_t fin_time = get_current_time();
         int diff = (fin_time - start_time) / 1000000;
         size_t kb = mature_bytes_allocated() / 1024;
@@ -627,7 +631,7 @@ step1:
       }
     }
 
-    state->shared.restart_world(state);
+    state->restart_world();
     bool added = added_finalizers_;
     added_finalizers_ = false;
 
@@ -873,15 +877,13 @@ step1:
 
       gc_stats.mature_object_allocated(bytes);
 
-      if(collect_mature_now) {
-        root_state_->interrupts.set_perform_gc();
-      }
+      if(collect_mature_now) shared_.gc_soon();
 
     } else {
       obj = young_->allocate(bytes, &collect_young_now);
       if(unlikely(obj == NULL)) {
         collect_young_now = true;
-        root_state_->interrupts.set_perform_gc();
+        shared_.gc_soon();
 
         obj = immix_->allocate(bytes);
 
@@ -891,9 +893,7 @@ step1:
 
         gc_stats.mature_object_allocated(bytes);
 
-        if(collect_mature_now) {
-          root_state_->interrupts.set_perform_gc();
-        }
+        if(collect_mature_now) shared_.gc_soon();
       } else {
         gc_stats.young_object_allocated(bytes);
       }
@@ -926,9 +926,7 @@ step1:
       gc_stats.mature_object_allocated(bytes);
     }
 
-    if(collect_mature_now) {
-      root_state_->interrupts.set_perform_gc();
-    }
+    if(collect_mature_now) shared_.gc_soon();
 
 #ifdef ENABLE_OBJECT_WATCH
     if(watched_p(obj)) {
@@ -985,9 +983,7 @@ step1:
     Object* obj = mark_sweep_->allocate(bytes, &collect_mature_now);
     gc_stats.mature_object_allocated(bytes);
 
-    if(collect_mature_now) {
-      root_state_->interrupts.set_perform_gc();
-    }
+    if(collect_mature_now) shared_.gc_soon();
 
 #ifdef ENABLE_OBJECT_WATCH
     if(watched_p(obj)) {
@@ -1109,9 +1105,9 @@ step1:
       // Take the lock, remove the first one from the list,
       // then process it.
       {
-        SCOPE_LOCK(state, finalizer_lock_);
+        SCOPE_LOCK(state->vm(), finalizer_lock_);
 
-        state->set_call_frame(0);
+        state->vm()->set_call_frame(0);
 
         while(to_finalize_.empty()) {
           GCIndependent indy(state);
@@ -1160,13 +1156,14 @@ step1:
       fi->status = FinalizeObject::eFinalized;
     }
 
-    state->set_call_frame(0);
-    state->shared.checkpoint(state);
+    GCTokenImpl gct;
+
+    state->checkpoint(gct, 0);
   }
 
   void ObjectMemory::run_finalizers(STATE, CallFrame* call_frame) {
     {
-      SCOPE_LOCK(state, finalizer_lock_);
+      SCOPE_LOCK(state->vm(), finalizer_lock_);
       if(running_finalizers_) return;
       running_finalizers_ = true;
     }
@@ -1220,7 +1217,7 @@ step1:
 
   void ObjectMemory::run_all_finalizers(STATE) {
     {
-      SCOPE_LOCK(state, finalizer_lock_);
+      SCOPE_LOCK(state->vm(), finalizer_lock_);
       if(running_finalizers_) return;
       running_finalizers_ = true;
     }
@@ -1263,7 +1260,7 @@ step1:
 
   void ObjectMemory::run_all_io_finalizers(STATE) {
     {
-      SCOPE_LOCK(state, finalizer_lock_);
+      SCOPE_LOCK(state->vm(), finalizer_lock_);
       if(running_finalizers_) return;
       running_finalizers_ = true;
     }
@@ -1307,12 +1304,12 @@ step1:
   }
 
   Object* in_finalizer(STATE) {
-    state->shared.om->in_finalizer_thread(state);
+    state->shared().om->in_finalizer_thread(state);
     return Qnil;
   }
 
   void ObjectMemory::start_finalizer_thread(STATE) {
-    VM* vm = state->shared.new_vm();
+    VM* vm = state->shared().new_vm();
     Thread* thr = Thread::create(state, vm, G(thread), in_finalizer);
     finalizer_thread_.set(thr);
     thr->fork(state);
@@ -1395,7 +1392,7 @@ step1:
   };
 
   void ObjectMemory::find_referers(Object* target, ObjectArray& result) {
-    ObjectMemory::GCInhibit inhibitor(root_state_->om);
+    ObjectMemory::GCInhibit inhibitor(this);
 
     ObjectWalker walker(root_state_->om);
     GCData gc_data(root_state_);
@@ -1420,7 +1417,7 @@ step1:
     }
   }
 
-  void ObjectMemory::snapshot() {
+  void ObjectMemory::snapshot(STATE) {
     // Assign all objects an object id...
     ObjectMemory::GCInhibit inhibitor(root_state_->om);
 
@@ -1433,7 +1430,7 @@ step1:
       last_seen = last_object_id;
 
       ObjectWalker walker(root_state_->om);
-      GCData gc_data(root_state_);
+      GCData gc_data(state->vm());
 
       // Seed it with the root objects.
       walker.seed(gc_data);
@@ -1441,7 +1438,7 @@ step1:
       Object* obj = walker.next();
 
       while(obj) {
-        obj->id(root_state_);
+        obj->id(state);
         obj = walker.next();
       }
     }
@@ -1453,7 +1450,7 @@ step1:
     std::cout << "Snapshot taken: " << last_snapshot_id << "\n";
   }
 
-  void ObjectMemory::print_new_since_snapshot() {
+  void ObjectMemory::print_new_since_snapshot(STATE) {
     // Assign all objects an object id...
     ObjectMemory::GCInhibit inhibitor(root_state_->om);
 
@@ -1472,14 +1469,14 @@ step1:
     int bytes = 0;
 
     while(obj) {
-      if(!obj->has_id(root_state_) || obj->id(root_state_)->to_native() > check_id) {
+      if(!obj->has_id(state) || obj->id(state)->to_native() > check_id) {
         count++;
-        bytes += obj->size_in_bytes(root_state_);
+        bytes += obj->size_in_bytes(state->vm());
 
         if(kind_of<String>(obj)) {
           std::cout << "#<String:" << obj << ">\n";
         } else {
-          std::cout << obj->to_s(root_state_, true)->c_str(root_state_) << "\n";
+          std::cout << obj->to_s(state, true)->c_str(state) << "\n";
         }
       }
 
@@ -1490,7 +1487,7 @@ step1:
     std::cout << bytes << " bytes since snapshot.\n";
   }
 
-  void ObjectMemory::print_references(Object* obj) {
+  void ObjectMemory::print_references(STATE, Object* obj) {
     ObjectArray ary;
 
     find_referers(obj, ary);
@@ -1501,31 +1498,13 @@ step1:
     for(ObjectArray::iterator i = ary.begin();
         i != ary.end();
         ++i) {
-      std::cout << "  " << (*i)->to_s(root_state_, true)->c_str(root_state_) << "\n";
+      std::cout << "  " << (*i)->to_s(state, true)->c_str(state) << "\n";
 
       if(++count == 100) break;
     }
   }
 };
 
-
-// Memory utility functions for use in gdb
-
-void x_memstat() {
-  rubinius::VM::current()->om->memstats();
-}
-
-void print_references(void* obj) {
-  rubinius::VM::current()->om->print_references((rubinius::Object*)obj);
-}
-
-void x_snapshot() {
-  rubinius::VM::current()->om->snapshot();
-}
-
-void x_print_snapshot() {
-  rubinius::VM::current()->om->print_new_since_snapshot();
-}
 
 // The following memory functions are defined in ruby.h for use by C-API
 // extensions, and also used by library code lifted from MRI (e.g. Oniguruma).

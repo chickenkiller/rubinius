@@ -18,10 +18,6 @@ class Numeric
     [div(other), self % other]
   end
 
-  def div(other)
-    Float(self.__slash__(other)).floor
-  end
-
   def quo(other)
     self.__slash__(other)
   end
@@ -88,11 +84,6 @@ class Numeric
   # Delegate #to_int to #to_i in subclasses
   def to_int
     to_i
-  end
-
-  # Delegate #modulo to #% in subclasses
-  def modulo(other)
-    self % other
   end
 
   def integer?

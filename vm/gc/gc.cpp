@@ -24,15 +24,25 @@
 
 namespace rubinius {
 
-  GCData::GCData(STATE)
+  GCData::GCData(VM* state)
     : roots_(state->globals().roots)
     , handles_(state->shared.global_handles())
     , cached_handles_(state->shared.cached_handles())
     , global_cache_(state->shared.global_cache)
     , threads_(state->shared.threads())
     , global_handle_locations_(state->shared.global_handle_locations())
+    , gc_token_(0)
   {}
 
+  GCData::GCData(VM* state, GCToken gct)
+    : roots_(state->globals().roots)
+    , handles_(state->shared.global_handles())
+    , cached_handles_(state->shared.cached_handles())
+    , global_cache_(state->shared.global_cache)
+    , threads_(state->shared.threads())
+    , global_handle_locations_(state->shared.global_handle_locations())
+    , gc_token_(&gct)
+  {}
   GarbageCollector::GarbageCollector(ObjectMemory *om)
                    :object_memory_(om), weak_refs_(NULL) { }
 

@@ -304,6 +304,7 @@
 #define HAVE_RB_STR_INTERN                 1
 #define HAVE_RB_STR_LEN                    1
 #define HAVE_RB_STR_NEW                    1
+#define HAVE_RB_STR_NEW_CSTR               1
 #define HAVE_RB_STR_NEW2                   1
 #define HAVE_RB_STR_NEW3                   1
 #define HAVE_RB_STR_NEW4                   1
@@ -360,14 +361,18 @@
 #include "rubyspec_version.h"
 
 #if RUBY_VERSION_MAJOR == 1 && RUBY_VERSION_MINOR == 8
+#define RUBY_VERSION_IS_1_8_EX_1_9
+#endif
+
+#if RUBY_VERSION_MAJOR == 1 && RUBY_VERSION_MINOR >= 8
 #define RUBY_VERSION_IS_1_8
 #endif
 
 #if RUBY_VERSION_MAJOR == 1 && RUBY_VERSION_MINOR == 8 && RUBY_VERSION_TEENY < 7
-#define RUBY_VERSION_IS_LT_1_8_7
+#define RUBY_VERSION_IS_1_8_EX_1_8_7
 #endif
 
-#if RUBY_VERSION_MAJOR == 1 && RUBY_VERSION_MINOR == 9
+#if (RUBY_VERSION_MAJOR == 1 && RUBY_VERSION_MINOR == 9) || (RUBY_VERSION_MAJOR == 2)
 #define RUBY_VERSION_IS_1_9
 #endif
 

@@ -9,15 +9,19 @@
 #include "builtin/system.hpp"
 #include "builtin/tuple.hpp"
 
+#include "ontology.hpp"
+
 namespace rubinius {
   void VariableScope::init(STATE) {
-    GO(variable_scope).set(state->new_class("VariableScope", G(object), G(rubinius)));
+    GO(variable_scope).set(ontology::new_class(state, 
+          "VariableScope", G(object), G(rubinius)));
     G(variable_scope)->set_object_type(state, VariableScopeType);
     G(variable_scope)->name(state, state->symbol("Rubinius::VariableScope"));
   }
 
   void VariableScope::bootstrap_methods(STATE) {
-    System::attach_primitive(state,
+    GCTokenImpl gct;
+    System::attach_primitive(state, gct,
                              G(variable_scope), false,
                              state->symbol("method_visibility"),
                              state->symbol("variable_scope_method_visibility"));

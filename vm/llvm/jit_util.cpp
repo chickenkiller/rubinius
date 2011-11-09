@@ -44,12 +44,12 @@
       Exception* exc = \
         Exception::make_type_error(state, e.type, e.object, e.reason); \
       exc->locations(state, Location::from_call_stack(state, call_frame)); \
-      state->thread_state()->raise_exception(exc); \
+      state->raise_exception(exc); \
       return NULL; \
     } catch(const RubyException& exc) { \
       exc.exception->locations(state, \
             Location::from_call_stack(state, call_frame)); \
-      state->thread_state()->raise_exception(exc.exception); \
+      state->raise_exception(exc.exception); \
       return NULL; \
     }
 
@@ -63,7 +63,7 @@ extern "C" {
 
   Object* rbx_write_barrier(STATE, Object* obj, Object* val) {
     if(obj->zone() == UnspecifiedZone) return val;
-    state->om->write_barrier(obj, val);
+    obj->write_barrier(state, val);
     return val;
   }
 
@@ -214,7 +214,7 @@ extern "C" {
     Exception* exc =
         Exception::make_argument_error(state, required, args.total(), args.name());
     exc->locations(state, Location::from_call_stack(state, call_frame));
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
 
     return NULL;
   }
@@ -255,7 +255,8 @@ extern "C" {
     }
 
     VMMethod* vmm = call_frame->cm->backend_method();
-    return BlockEnvironment::under_call_frame(state, cm, vmm,
+    GCTokenImpl gct;
+    return BlockEnvironment::under_call_frame(state, gct, cm, vmm,
                                               call_frame, index);
 
     CPP_CATCH
@@ -287,7 +288,8 @@ extern "C" {
     cm->scope(state, closest->static_scope());
 
     VMMethod* vmm = closest->cm->backend_method();
-    return BlockEnvironment::under_call_frame(state, cm, vmm, closest, index);
+    GCTokenImpl gct;
+    return BlockEnvironment::under_call_frame(state, gct, cm, vmm, closest, index);
   }
 
   Object* rbx_promote_variables(STATE, CallFrame* call_frame) {
@@ -634,7 +636,7 @@ extern "C" {
     } else if(Proc* proc = try_as<Proc>(block)) {
       return proc->yield(state, call_frame, out_args);
     } else if(block->nil_p()) {
-      state->thread_state()->raise_exception(Exception::make_lje(state, call_frame));
+      state->raise_exception(Exception::make_lje(state, call_frame));
       return NULL;
     }
 
@@ -659,7 +661,7 @@ extern "C" {
     } else if(Proc* proc = try_as<Proc>(block)) {
       return proc->yield(state, call_frame, args);
     } else if(block->nil_p()) {
-      state->thread_state()->raise_exception(Exception::make_lje(state, call_frame));
+      state->raise_exception(Exception::make_lje(state, call_frame));
       return NULL;
     }
 
@@ -905,94 +907,78 @@ extern "C" {
   }
 
   Object* rbx_prologue_check(STATE, CallFrame* call_frame) {
-    if(!state->check_interrupts(call_frame, &state)) return NULL;
+    GCTokenImpl gct;
 
-    if(!state->interrupts.check) return Qtrue;
+    if(!state->check_interrupts(gct, call_frame, &state)) return NULL;
 
-    state->interrupts.checked();
-
-    if(state->interrupts.perform_gc) {
-      state->interrupts.perform_gc = false;
-      state->collect_maybe(call_frame);
-    }
-
-    state->set_call_frame(call_frame);
-    state->shared.checkpoint(state);
+    state->checkpoint(gct, call_frame);
 
     return Qtrue;
   }
 
   Object* rbx_check_interrupts(STATE, CallFrame* call_frame) {
-    if(unlikely(state->interrupts.check)) {
-      state->interrupts.checked();
-
-      if(state->interrupts.perform_gc) {
-        state->interrupts.perform_gc = true;
-        state->collect_maybe(call_frame);
-      }
-    }
+    GCTokenImpl gct;
 
     if(!state->check_async(call_frame)) return NULL;
 
-    state->set_call_frame(call_frame);
-    state->shared.checkpoint(state);
+    state->checkpoint(gct, call_frame);
     return Qtrue;
   }
 
   int rbx_enter_unmanaged(STATE, CallFrame* call_frame) {
     state->set_call_frame(call_frame);
-    state->shared.gc_independent(state);
+    state->gc_independent();
     return 0;
   }
 
   int rbx_exit_unmanaged(STATE, CallFrame* call_frame) {
     state->set_call_frame(call_frame);
-    state->shared.gc_dependent(state);
+    state->gc_dependent();
     return 0;
   }
 
   bool rbx_return_to_here(STATE, CallFrame* call_frame) {
-    ThreadState* th = state->thread_state();
+    ThreadState* th = state->vm()->thread_state();
     if(th->raise_reason() != cReturn) return false;
     if(th->destination_scope() == call_frame->scope->on_heap()) return true;
     return false;
   }
 
   bool rbx_break_to_here(STATE, CallFrame* call_frame) {
-    ThreadState* th = state->thread_state();
+    ThreadState* th = state->vm()->thread_state();
     if(th->raise_reason() != cBreak) return false;
     if(th->destination_scope() == call_frame->scope->on_heap()) return true;
     return false;
   }
 
   Object* rbx_clear_raise_value(STATE) {
-    Object* val = state->thread_state()->raise_value();
-    state->thread_state()->clear_return();
+    Object* val = state->vm()->thread_state()->raise_value();
+    state->vm()->thread_state()->clear_return();
     return val;
   }
 
   bool rbx_raising_exception(STATE) {
-    return state->thread_state()->raise_reason() == cException;
+    return state->vm()->thread_state()->raise_reason() == cException;
   }
 
   Object* rbx_current_exception(STATE) {
-    return state->thread_state()->current_exception();
+    return state->vm()->thread_state()->current_exception();
   }
 
   Object* rbx_clear_exception(STATE) {
-    state->thread_state()->clear_raise();
+    state->vm()->thread_state()->clear_raise();
     return Qnil;
   }
 
   Object* rbx_push_exception_state(STATE) {
-    return state->thread_state()->state_as_object(state);
+    return state->vm()->thread_state()->state_as_object(state);
   }
 
   Object* rbx_restore_exception_state(STATE, CallFrame* call_frame, Object* top) {
     if(top->nil_p()) {
-      state->thread_state()->clear();
+      state->vm()->thread_state()->clear();
     } else {
-      state->thread_state()->set_state(state, top);
+      state->vm()->thread_state()->set_state(state, top);
     }
 
     return Qnil;
@@ -1120,12 +1106,12 @@ extern "C" {
        !call_frame->scope_still_valid(call_frame->top_scope(state))) {
       Exception* exc = Exception::make_exception(state, G(jump_error), "unexpected return");
       exc->locations(state, Location::from_call_stack(state, call_frame));
-      state->thread_state()->raise_exception(exc);
+      state->raise_exception(exc);
     } else {
       if(call_frame->flags & CallFrame::cIsLambda) {
-        state->thread_state()->raise_return(top, call_frame->promote_scope(state));
+        state->vm()->thread_state()->raise_return(top, call_frame->promote_scope(state));
       } else {
-        state->thread_state()->raise_return(top, call_frame->top_scope(state));
+        state->vm()->thread_state()->raise_return(top, call_frame->top_scope(state));
       }
     }
 
@@ -1133,7 +1119,7 @@ extern "C" {
   }
 
   Object* rbx_ensure_return(STATE, CallFrame* call_frame, Object* top) {
-    state->thread_state()->raise_return(top, call_frame->promote_scope(state));
+    state->vm()->thread_state()->raise_return(top, call_frame->promote_scope(state));
     return Qnil;
   }
 
@@ -1141,14 +1127,14 @@ extern "C" {
     if(call_frame->flags & CallFrame::cIsLambda) {
       // We have to use raise_return here because the jit code
       // jumps to raising the exception right away.
-      state->thread_state()->raise_return(top,
+      state->vm()->thread_state()->raise_return(top,
                                           call_frame->promote_scope(state));
     } else if(call_frame->scope_still_valid(call_frame->scope->parent())) {
-      state->thread_state()->raise_break(top, call_frame->scope->parent());
+      state->vm()->thread_state()->raise_break(top, call_frame->scope->parent());
     } else {
       Exception* exc = Exception::make_exception(state, G(jump_error), "attempted to break to exited method");
       exc->locations(state, Location::from_call_stack(state, call_frame));
-      state->thread_state()->raise_exception(exc);
+      state->raise_exception(exc);
     }
     return Qnil;
   }
@@ -1278,7 +1264,7 @@ extern "C" {
 
     Exception* exc =
       Exception::make_type_error(state, Fixnum::type, obj, "invalid type for FFI");
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
 
     *valid = false;
     return 0;
@@ -1292,7 +1278,7 @@ extern "C" {
 
     Exception* exc =
       Exception::make_type_error(state, Float::type, obj, "invalid type for FFI");
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
 
     *valid = false;
     return 0.0;
@@ -1306,7 +1292,7 @@ extern "C" {
 
     Exception* exc =
       Exception::make_type_error(state, Float::type, obj, "invalid type for FFI");
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
 
     *valid = false;
     return 0.0;
@@ -1320,7 +1306,7 @@ extern "C" {
 
     Exception* exc =
       Exception::make_type_error(state, Fixnum::type, obj, "invalid type for FFI");
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
 
     *valid = false;
     return 0ULL;
@@ -1337,7 +1323,7 @@ extern "C" {
 
     Exception* exc =
       Exception::make_type_error(state, Fixnum::type, obj, "invalid type for FFI");
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
 
     *valid = false;
     return 0;
@@ -1351,7 +1337,7 @@ extern "C" {
 
     Exception* exc =
       Exception::make_type_error(state, Fixnum::type, obj, "invalid type for FFI");
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
 
     *valid = false;
     return 0;
@@ -1434,7 +1420,8 @@ extern "C" {
   Object* rbx_create_instance(STATE, CallFrame* call_frame, Class* cls) {
     CPP_TRY
 
-    return cls->allocate(state, call_frame);
+    GCTokenImpl gct;
+    return cls->allocate(state, gct, call_frame);
 
     CPP_CATCH
   }

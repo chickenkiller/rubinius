@@ -153,6 +153,10 @@ namespace rubinius {
       return mutex_;
     }
 
+    void lock_init(ManagedThread* th) {
+      mutex_.init(th);
+    }
+
     void lock(ManagedThread* th) {
       mutex_.lock(th);
     }
@@ -189,6 +193,9 @@ namespace rubinius {
       }
     }
 
+    LockableScopedLock(State* state, Lockable* lock,
+                       const char* file="unknown", int line=0);
+
     void unlock() {
       if(recursive_) return;
 
@@ -213,7 +220,7 @@ namespace rubinius {
   };
 
 
-#define SYNC(vm) LockableScopedLock __lsl_guard__(vm, this, __FILE__, __LINE__)
+#define SYNC(__state) LockableScopedLock __lsl_guard__(__state, this, __FILE__, __LINE__)
 #define SYNC_TL LockableScopedLock __lsl_guard__(ManagedThread::current(), this, __FILE__, __LINE__)
 
 #define UNSYNC __lsl_guard__.unlock()

@@ -6,10 +6,6 @@ class Float
     0
   end
 
-  def real?
-    true
-  end
-
   def numerator
     if nan?
       NAN
@@ -28,5 +24,13 @@ class Float
     else
       super
     end
+  end
+
+  def to_r
+    f, e = Math.frexp self
+    f = Math.ldexp(f, MANT_DIG).to_i
+    e -= MANT_DIG
+
+    (f * (RADIX ** e)).to_r
   end
 end

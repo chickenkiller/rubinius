@@ -15,17 +15,20 @@
 
 #include "global_cache.hpp"
 
+#include "on_stack.hpp"
+
 namespace rubinius {
 
   void Module::bootstrap_methods(STATE) {
-    System::attach_primitive(state,
+    GCTokenImpl gct;
+    System::attach_primitive(state, gct,
                              G(module), false,
                              state->symbol("const_set"),
                              state->symbol("module_const_set"));
   }
 
   Module* Module::create(STATE) {
-    Module* mod = state->om->new_object_enduring<Module>(state, G(module));
+    Module* mod = state->memory()->new_object_enduring<Module>(state, G(module));
 
     mod->name(state, nil<Symbol>());
     mod->superclass(state, nil<Module>());
@@ -90,12 +93,12 @@ namespace rubinius {
 
   void Module::set_const(STATE, Object* sym, Object* val) {
     constants()->store(state, sym, val);
-    state->shared.inc_global_serial(state);
+    state->shared().inc_global_serial(state);
   }
 
   void Module::del_const(STATE, Symbol* sym) {
     constants()->remove(state, sym);
-    state->shared.inc_global_serial(state);
+    state->shared().inc_global_serial(state);
   }
 
   void Module::set_const(STATE, std::string name, Object* val) {
@@ -127,10 +130,15 @@ namespace rubinius {
     return get_const(state, state->symbol(sym));
   }
 
-  void Module::add_method(STATE, Symbol* name, Executable* exec, Symbol* vis) {
+  void Module::add_method(STATE, GCToken gct, Symbol* name, Executable* exec,
+                          Symbol* vis)
+  {
+    Module* self = this;
+    OnStack<2> os(state, self, exec);
+
     if(!vis) vis = G(sym_public);
-    method_table_->store(state, name, exec, vis);
-    state->global_cache()->clear(state, this, name);
+    method_table_->store(state, gct, name, exec, vis);
+    state->vm()->global_cache()->clear(state, self, name);
   }
 
   Executable* Module::find_method(Symbol* name, Module** defined_in) {
@@ -367,7 +375,7 @@ namespace rubinius {
 
   IncludedModule* IncludedModule::create(STATE) {
     IncludedModule* imod;
-    imod = state->om->new_object_enduring<IncludedModule>(state, G(included_module));
+    imod = state->memory()->new_object_enduring<IncludedModule>(state, G(included_module));
 
     imod->name(state, state->symbol("<included module>"));
     imod->superclass(state, nil<Module>());

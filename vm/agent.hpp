@@ -50,7 +50,7 @@ namespace rubinius {
 
   private:
     SharedState& shared_;
-    VM* state_;
+    State state_;
     bool running_;
     int port_;
     int server_fd_;
@@ -70,12 +70,14 @@ namespace rubinius {
     agent::VariableAccess* vars_;
 
     bool local_only_;
+    bool use_password_;
+    std::string password_;
     uint32_t tmp_key_;
 
     const static int cBackLog = 10;
 
   public:
-    QueryAgent(SharedState& shared, VM* state);
+    QueryAgent(SharedState& shared, STATE);
     ~QueryAgent();
 
     void set_verbose() {
@@ -88,6 +90,10 @@ namespace rubinius {
 
     int port() {
       return port_;
+    }
+
+    State* state() {
+      return &state_;
     }
 
     void add_fd(int fd) {
@@ -135,6 +141,8 @@ namespace rubinius {
     void make_discoverable();
 
     virtual void perform();
+    bool check_password(Client& client);
+    bool check_file_auth(Client& client);
     bool process_commands(Client& client);
 
     void on_fork();

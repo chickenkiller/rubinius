@@ -1,4 +1,7 @@
 class IO
+  attr_accessor :external
+  attr_accessor :internal
+
   def self.binread(file, *arg)
     unless arg.size < 3
       raise ArgumentError, "wrong number of arguments (#{1+arg.size} for 1..3)"
@@ -9,7 +12,12 @@ class IO
     end
   end
 
+  def self.for_fd(fd, mode=undefined, options=undefined)
+    new fd, mode, options
+  end
+
   def self.read(name, length_or_options=undefined, offset=0, options=nil)
+    offset = 0 if offset.nil?
     name = Rubinius::Type.coerce_to_path name
     mode = "r"
 
@@ -139,6 +147,43 @@ class IO
   def self.copy_stream(from, to, max_length=nil, offset=nil)
     StreamCopier.new(from, to, max_length, offset).run
   end
+
+  #
+  # Create a new IO associated with the given fd.
+  #
+  def initialize(fd, mode=undefined, options=undefined)
+    if mode.equal? undefined
+      mode = nil
+    else
+      if mode.kind_of? Hash
+        options = mode
+        mode = options[:mode]
+      end
+    end
+
+    mode, external, internal = mode.split(":") if mode.kind_of? String
+
+    if block_given?
+      warn 'IO::new() does not take block; use IO::open() instead'
+    end
+
+    IO.setup self, Rubinius::Type.coerce_to(fd, Integer, :to_int), mode
+
+    if external or internal
+      set_encoding external, internal
+    elsif !options.equal? undefined
+      external = options[:external_encoding]
+      internal = options[:internal_encoding]
+
+      if external or internal
+        set_encoding external, internal
+      elsif encoding = options[:encoding]
+        set_encoding encoding
+      end
+    end
+  end
+
+  private :initialize
 
   # Argument matrix for IO#gets and IO#each:
   #
@@ -387,6 +432,36 @@ class IO
     end
 
     nil
+  end
+
+  def set_encoding(external, internal=nil)
+    unless external.kind_of? Encoding or external.kind_of? String
+      external = StringValue(external) if external
+    end
+
+    unless internal.kind_of? Encoding or internal.kind_of? String
+      internal = StringValue(internal) if internal
+    end
+
+    if external.kind_of? String
+      external, internal = external.split(':') unless internal
+    end
+
+    internal = nil if internal == "-"
+
+    external = Encoding.find external if external.kind_of? String
+    internal = Encoding.find internal if internal.kind_of? String
+
+    @external = external
+    @internal = internal unless internal == external
+  end
+
+  def external_encoding
+    @external
+  end
+
+  def internal_encoding
+    @internal
   end
 
   ##

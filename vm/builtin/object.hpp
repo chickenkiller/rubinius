@@ -103,6 +103,9 @@ namespace rubinius {
     void        write_barrier(STATE, void* obj);
     void        inline_write_barrier_passed(STATE, void* obj);
 
+    void        write_barrier(VM*, void* obj);
+    void        inline_write_barrier_passed(VM*, void* obj);
+
     /** Special-case write_barrier() for Fixnums. */
     void        write_barrier(STATE, Fixnum* obj);
     /** Special-case write_barrier() for Symbols. */
@@ -137,7 +140,7 @@ namespace rubinius {
      * by Kernel#clone.
      */
     // Rubinius.primitive :object_copy_singleton_class
-    Object* copy_singleton_class(STATE, Object* other);
+    Object* copy_singleton_class(STATE, GCToken gct, Object* other);
 
     /** True if this Object* is actually a Fixnum, false otherwise. */
     bool fixnum_p() const;
@@ -256,6 +259,9 @@ namespace rubinius {
 
     /** Indicates if this object has been assigned an object id. */
     bool has_id(STATE);
+
+    /** Reset the object id */
+    void reset_id(STATE);
 
     /**
      * Taints other if this is tainted.
@@ -391,6 +397,13 @@ namespace rubinius {
       virtual void auto_mark(Object* obj, ObjectMark& mark) {}
     };
 
+  private:
+    /**
+     * Checks if object is frozen and raises RuntimeError if it is.
+     * Similar to CRuby rb_check_frozen
+     */
+    void check_frozen(STATE);
+
   };
 
 
@@ -423,10 +436,19 @@ namespace rubinius {
   inline void Object::write_barrier(STATE, void* ptr) {
     Object* obj = reinterpret_cast<Object*>(ptr);
     if(!REFERENCE_P(obj) ||
-        state->young_object_p(this) ||
-        !state->young_object_p(obj)) return;
+        state->vm()->young_object_p(this) ||
+        !state->vm()->young_object_p(obj)) return;
 
     inline_write_barrier_passed(state, ptr);
+  }
+
+  inline void Object::write_barrier(VM* vm, void* ptr) {
+    Object* obj = reinterpret_cast<Object*>(ptr);
+    if(!REFERENCE_P(obj) ||
+         vm->young_object_p(this) ||
+        !vm->young_object_p(obj)) return;
+
+    inline_write_barrier_passed(vm, ptr);
   }
 
   // Used in filtering APIs

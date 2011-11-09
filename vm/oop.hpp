@@ -308,12 +308,12 @@ const int cUndef = 0x22L;
 
     bool update(HeaderWord header);
     void initialize_mutex(int thread_id, int count);
-    LockStatus lock_mutex(STATE, size_t us=0);
-    LockStatus lock_mutex_timed(STATE, const struct timespec* ts);
-    LockStatus try_lock_mutex(STATE);
-    bool locked_mutex_p(STATE);
-    LockStatus unlock_mutex(STATE);
-    void unlock_mutex_for_terminate(STATE);
+    LockStatus lock_mutex(STATE, GCToken gct, size_t us=0);
+    LockStatus lock_mutex_timed(STATE, GCToken gct, const struct timespec* ts);
+    LockStatus try_lock_mutex(STATE, GCToken gct);
+    bool locked_mutex_p(STATE, GCToken gct);
+    LockStatus unlock_mutex(STATE, GCToken gct);
+    void unlock_mutex_for_terminate(STATE, GCToken gct);
 
     void wakeup();
   };
@@ -408,7 +408,7 @@ const int cUndef = 0x22L;
     void copy_body(VM* state, Object* other);
 
     /* Used to make an exact state copy of +this+ into +other* */
-    void initialize_full_state(STATE, Object* other, unsigned int age);
+    void initialize_full_state(VM* vm, Object* other, unsigned int age);
 
     /* Clear the body of the object, by setting each field to Qnil */
     void clear_fields(size_t bytes);
@@ -451,15 +451,15 @@ const int cUndef = 0x22L;
 
     /* It's the slow case, should be called only if there's no cached
      * instance size. */
-    size_t slow_size_in_bytes(STATE) const;
+    size_t slow_size_in_bytes(VM* vm) const;
 
     /* The whole point of this is inlining */
-    size_t size_in_bytes(STATE) const {
+    size_t size_in_bytes(VM* vm) const {
       register size_t size = TypeInfo::instance_sizes[type_id()];
       if(size != 0) {
         return size;
       } else {
-        return slow_size_in_bytes(state);
+        return slow_size_in_bytes(vm);
       }
     }
 
@@ -621,17 +621,17 @@ const int cUndef = 0x22L;
 
     void set_object_id(STATE, ObjectMemory* om, uint32_t id);
 
-    LockStatus lock(STATE, size_t us=0);
-    LockStatus try_lock(STATE);
-    bool locked_p(STATE);
-    LockStatus unlock(STATE);
-    void unlock_for_terminate(STATE);
+    LockStatus lock(STATE, GCToken gct, size_t us=0);
+    LockStatus try_lock(STATE, GCToken gct);
+    bool locked_p(STATE, GCToken gct);
+    LockStatus unlock(STATE, GCToken gct);
+    void unlock_for_terminate(STATE, GCToken gct);
 
     // Abort if unable to lock
-    void hard_lock(STATE, size_t us=0);
+    void hard_lock(STATE, GCToken gct, size_t us=0);
 
     // Abort if unable to unlock
-    void hard_unlock(STATE);
+    void hard_unlock(STATE, GCToken gct);
 
     void wait(STATE);
 

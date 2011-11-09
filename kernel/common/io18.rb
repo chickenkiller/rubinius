@@ -1,4 +1,8 @@
 class IO
+  def self.for_fd(fd, mode = nil)
+    new fd, mode
+  end
+
   ##
   # Opens the file, optionally seeks to the given offset,
   # then returns length bytes (defaulting to the rest of
@@ -49,6 +53,19 @@ class IO
 
     return str
   end
+
+  #
+  # Create a new IO associated with the given fd.
+  #
+  def initialize(fd, mode=nil)
+    if block_given?
+      warn 'IO::new() does not take block; use IO::open() instead'
+    end
+
+    IO.setup self, Rubinius::Type.coerce_to(fd, Integer, :to_int), mode
+  end
+
+  private :initialize
 
   ##
   # Chains together buckets of input from the buffer until

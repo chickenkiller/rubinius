@@ -4,6 +4,7 @@ class BasicPrimitive
   attr_accessor :pass_call_frame
   attr_accessor :pass_message
   attr_accessor :pass_arguments
+  attr_accessor :pass_gctoken
   attr_accessor :raw
   attr_accessor :safe
   attr_accessor :can_fail
@@ -23,6 +24,7 @@ class BasicPrimitive
     str << "  Object* ret;\n"
     return str if @raw
     str << "  Object* self;\n" if @pass_self
+    str << "  GCTokenImpl gct;\n" if @pass_gctoken
   end
 
   def output_args(str, arg_types)
@@ -46,6 +48,7 @@ class BasicPrimitive
         args << "a#{i}"
       end
     end
+    args.unshift "gct" if @pass_gctoken
     args.unshift "self" if @pass_self
     args.unshift "state" if @pass_state
 
@@ -66,7 +69,7 @@ class BasicPrimitive
     str << "\n"
     str << "  try {\n"
     str << "#ifdef RBX_PROFILER\n"
-    str << "    if(unlikely(state->tooling())) {\n"
+    str << "    if(unlikely(state->vm()->tooling())) {\n"
     str << "      tooling::MethodEntry method(state, exec, mod, args);\n"
     str << "      ret = #{call}(#{args.join(', ')});\n"
     str << "    } else {\n"
@@ -78,7 +81,7 @@ class BasicPrimitive
     str << "  } catch(const RubyException& exc) {\n"
     str << "    exc.exception->locations(state,\n"
     str << "          Location::from_call_stack(state, call_frame));\n"
-    str << "    state->thread_state()->raise_exception(exc.exception);\n"
+    str << "    state->raise_exception(exc.exception);\n"
     str << "    return NULL;\n"
     str << "  }\n"
     str << "\n"
@@ -125,7 +128,7 @@ class CPPPrimitive < BasicPrimitive
       str << "  } catch(const RubyException& exc) {\n"
       str << "    exc.exception->locations(state,\n"
       str << "          Location::from_call_stack(state, call_frame));\n"
-      str << "    state->thread_state()->raise_exception(exc.exception);\n"
+      str << "    state->raise_exception(exc.exception);\n"
       str << "    return NULL;\n"
       str << "  }\n"
       str << "  if(ret == Primitives::failure()) goto fail;\n"
@@ -166,6 +169,7 @@ class CPPPrimitive < BasicPrimitive
     end
 
     str << "  Object* ret;\n"
+    str << "  GCTokenImpl gct;\n" if @pass_gctoken
 
     emit_fail = false
 
@@ -197,6 +201,7 @@ class CPPPrimitive < BasicPrimitive
       str << "  state->set_call_frame(call_frame);\n"
     end
 
+    args.unshift "gct" if @pass_gctoken
     args.unshift "recv" if @pass_self
     args.unshift "state" if @pass_state
 
@@ -210,7 +215,7 @@ class CPPPrimitive < BasicPrimitive
       str << "  } catch(const RubyException& exc) {\n"
       str << "    exc.exception->locations(state,\n"
       str << "          Location::from_call_stack(state, call_frame));\n"
-      str << "    state->thread_state()->raise_exception(exc.exception);\n"
+      str << "    state->raise_exception(exc.exception);\n"
       str << "    return NULL;\n"
       str << "  }\n"
       str << "\n"
@@ -246,6 +251,7 @@ class CPPPrimitive < BasicPrimitive
     str << "extern \"C\" Object* invoke_#{@name}(STATE, CallFrame* call_frame, Object** args, int arg_count) {\n"
 
     str << "  Object* ret;\n"
+    str << "  GCTokenImpl gct;\n" if @pass_gctoken
 
     i = 0
     arg_types.each do |t|
@@ -280,6 +286,7 @@ class CPPPrimitive < BasicPrimitive
       i += 1
     end
 
+    args.unshift "gct" if @pass_gctoken
     args.unshift "recv" if @pass_self
     args.unshift "state" if @pass_state
     args.push "call_frame" if @pass_call_frame
@@ -290,7 +297,7 @@ class CPPPrimitive < BasicPrimitive
     str << "  } catch(const RubyException& exc) {\n"
     str << "    exc.exception->locations(state,\n"
     str << "          Location::from_call_stack(state, call_frame));\n"
-    str << "    state->thread_state()->raise_exception(exc.exception);\n"
+    str << "    state->raise_exception(exc.exception);\n"
     str << "    return NULL;\n"
     str << "  }\n"
     str << "\n"
@@ -318,7 +325,7 @@ class CPPStaticPrimitive < CPPPrimitive
       str << "  } catch(const RubyException& exc) {\n"
       str << "    exc.exception->locations(state,\n"
       str << "          Location::from_call_stack(state, call_frame));\n"
-      str << "    state->thread_state()->raise_exception(exc.exception);\n"
+      str << "    state->raise_exception(exc.exception);\n"
       str << "    return NULL;\n"
       str << "  }\n"
       str << "\n"
@@ -353,6 +360,7 @@ class CPPStaticPrimitive < CPPPrimitive
     end
 
     str << "  Object* ret;\n"
+    str << "  GCTokenImpl gct;\n" if @pass_gctoken
 
     i = 0
     arg_types.each do |t|
@@ -372,6 +380,7 @@ class CPPStaticPrimitive < CPPPrimitive
       i += 1
     end
 
+    args.unshift "gct" if @pass_gctoken
     args.unshift "recv" if @pass_self
     args.unshift "state" if @pass_state
 
@@ -385,7 +394,7 @@ class CPPStaticPrimitive < CPPPrimitive
       str << "  } catch(const RubyException& exc) {\n"
       str << "    exc.exception->locations(state,\n"
       str << "          Location::from_call_stack(state, call_frame));\n"
-      str << "    state->thread_state()->raise_exception(exc.exception);\n"
+      str << "    state->raise_exception(exc.exception);\n"
       str << "    return NULL;\n"
       str << "  }\n"
       str << "\n"
@@ -421,6 +430,7 @@ class CPPStaticPrimitive < CPPPrimitive
     str << "extern \"C\" Object* invoke_#{@name}(STATE, CallFrame* call_frame, Object** args, int arg_count) {\n"
 
     str << "  Object* ret;\n"
+    str << "  GCTokenImpl gct;\n" if @pass_gctoken
 
     i = 0
     arg_types.each do |t|
@@ -441,6 +451,7 @@ class CPPStaticPrimitive < CPPPrimitive
       i += 1
     end
 
+    args.unshift "gct" if @pass_gctoken
     args.unshift "args[arg_count-1]" if @pass_self
     args.unshift "state" if @pass_state
     args.push "call_frame" if @pass_call_frame
@@ -451,7 +462,7 @@ class CPPStaticPrimitive < CPPPrimitive
     str << "  } catch(const RubyException& exc) {\n"
     str << "    exc.exception->locations(state,\n"
     str << "          Location::from_call_stack(state, call_frame));\n"
-    str << "    state->thread_state()->raise_exception(exc.exception);\n"
+    str << "    state->raise_exception(exc.exception);\n"
     str << "    return NULL;\n"
     str << "  }\n"
     str << "\n"
@@ -500,7 +511,7 @@ class CPPOverloadedPrimitive < BasicPrimitive
         call = "        ret = recv->#{@cpp_name}(arg);\n"
       end
       str << "#ifdef RBX_PROFILER\n"
-      str << "        if(unlikely(state->tooling())) {\n"
+      str << "        if(unlikely(state->vm()->tooling())) {\n"
       str << "          tooling::MethodEntry method(state, exec, mod, args);\n"
       str << "  " << call
       str << "        } else {\n"
@@ -512,7 +523,7 @@ class CPPOverloadedPrimitive < BasicPrimitive
       str << "      } catch(const RubyException& exc) {\n"
       str << "        exc.exception->locations(state,\n"
       str << "              Location::from_call_stack(state, call_frame));\n"
-      str << "        state->thread_state()->raise_exception(exc.exception);\n"
+      str << "        state->raise_exception(exc.exception);\n"
       str << "        return NULL;\n"
       str << "      }\n"
       str << "      if(likely(ret != reinterpret_cast<Object*>(kPrimitiveFailed))) {\n"
@@ -948,6 +959,7 @@ class CPPParser
           pass_call_frame = false
           pass_message = false
           pass_arguments = false
+          pass_gctoken = false
 
           m = prototype_pattern.match(prototype)
           unless m
@@ -957,6 +969,13 @@ class CPPParser
           # If the first argument is the +STATE+ macro, handle it in +output_args+
           if args.first == "STATE"
             args.shift and pass_state = true
+
+            if args.first =~ /GCToken .*/
+              args.shift
+              pass_gctoken = true
+            end
+
+
             # If the second argument is +Object* self+, we will automatically pass
             # in the receiver of the primitive message in +output_call+
             if args.first == "Object* self"
@@ -1007,6 +1026,7 @@ class CPPParser
           obj.pass_call_frame = pass_call_frame
           obj.pass_message = pass_message
           obj.pass_arguments = pass_arguments
+          obj.pass_gctoken = pass_gctoken
         elsif object_size_pattern.match(l)
           cpp.class_has_object_size
         end
@@ -1103,7 +1123,7 @@ write_if_new "vm/gen/typechecks.gen.cpp" do |f|
   f.puts "void TypeInfo::auto_learn_fields(STATE) {"
   parser.classes.each do |n, cpp|
     f.puts "  {"
-    f.puts "    TypeInfo* ti = state->find_type(#{n}::type);"
+    f.puts "    TypeInfo* ti = state->vm()->find_type(#{n}::type);"
     f.puts "    ti->set_state(state);"
 
     fields = cpp.all_fields

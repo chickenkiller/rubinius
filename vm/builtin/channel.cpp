@@ -19,18 +19,21 @@
 
 #include "on_stack.hpp"
 
+#include "ontology.hpp"
+
 #include <sys/time.h>
 
 namespace rubinius {
 
   void Channel::init(STATE) {
-    GO(channel).set(state->new_class("Channel", G(object), G(rubinius)));
+    GO(channel).set(ontology::new_class(state, "Channel",
+                      G(object), G(rubinius)));
     G(channel)->set_object_type(state, Channel::type);
     G(channel)->name(state, state->symbol("Rubinius::Channel"));
   }
 
   Channel* Channel::create(STATE) {
-    Channel* chan = state->new_object_mature<Channel>(G(channel));
+    Channel* chan = state->vm()->new_object_mature<Channel>(G(channel));
     chan->waiters_ = 0;
     chan->semaphore_count_ = 0;
 
@@ -44,7 +47,7 @@ namespace rubinius {
   }
 
   Channel* Channel::create_primed(STATE) {
-    Channel* chan = state->new_object_mature<Channel>(G(channel));
+    Channel* chan = state->vm()->new_object_mature<Channel>(G(channel));
     chan->waiters_ = 0;
     chan->semaphore_count_ = 1;
 
@@ -62,11 +65,12 @@ namespace rubinius {
     // waiting_->remove(state, waiter);
   }
 
-  Object* Channel::send(STATE, Object* val) {
+  Object* Channel::send(STATE, GCToken gct, Object* val) {
     Channel* self = this;
+
     OnStack<2> os(state, val, self);
 
-    GCLockGuard lg(state, mutex_);
+    GCLockGuard lg(state, gct, mutex_);
 
     if(val->nil_p()) {
       self->semaphore_count_++;
@@ -88,11 +92,11 @@ namespace rubinius {
     return Qnil;
   }
 
-  Object* Channel::try_receive(STATE) {
+  Object* Channel::try_receive(STATE, GCToken gct) {
     Channel* self = this;
     OnStack<1> os(state, self);
 
-    GCLockGuard lg(state, mutex_);
+    GCLockGuard lg(state, gct, mutex_);
 
     if(self->semaphore_count_ > 0) {
       self->semaphore_count_--;
@@ -103,12 +107,12 @@ namespace rubinius {
     return self->value_->shift(state);
   }
 
-  Object* Channel::receive(STATE, CallFrame* call_frame) {
-    return receive_timeout(state, Qnil, call_frame);
+  Object* Channel::receive(STATE, GCToken gct, CallFrame* call_frame) {
+    return receive_timeout(state, gct, Qnil, call_frame);
   }
 
 #define NANOSECONDS 1000000000
-  Object* Channel::receive_timeout(STATE, Object* duration, CallFrame* call_frame) {
+  Object* Channel::receive_timeout(STATE, GCToken gct, Object* duration, CallFrame* call_frame) {
     // Passing control away means that the GC might run. So we need
     // to stash this into a root, and read it back out again after
     // control is returned.
@@ -121,7 +125,7 @@ namespace rubinius {
     Channel* self = this;
     OnStack<2> os(state, self, duration);
 
-    GCLockGuard lg(state, mutex_);
+    GCLockGuard lg(state, gct, mutex_);
 
     if(self->semaphore_count_ > 0) {
       self->semaphore_count_--;
@@ -162,7 +166,7 @@ namespace rubinius {
 
     self->waiters_++;
 
-    state->wait_on_channel(self);
+    state->vm()->wait_on_channel(self);
 
     for(;;) {
       {
@@ -179,8 +183,8 @@ namespace rubinius {
       if(self->semaphore_count_ > 0 || !self->value()->empty_p()) break;
     }
 
-    state->clear_waiter();
-    state->thread->sleep(state, Qfalse);
+    state->vm()->clear_waiter();
+    state->vm()->thread->sleep(state, Qfalse);
 
     self->unpin();
     self->waiters_--;
@@ -214,7 +218,8 @@ namespace rubinius {
     }
 
     virtual void call(Object* obj) {
-      chan->send(state, obj);
+      GCTokenImpl gct;
+      chan->send(state, gct, obj);
     }
   };
 
@@ -225,6 +230,7 @@ namespace rubinius {
   }
 
   void ChannelCallback::call(Object* obj) {
-    channel->send(state, obj);
+    GCTokenImpl gct;
+    channel->send(state, gct, obj);
   }
 }

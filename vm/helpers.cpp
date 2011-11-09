@@ -1,4 +1,4 @@
-#include "helpers.hpp"
+
 #include "builtin/object.hpp"
 #include "call_frame.hpp"
 #include "builtin/autoload.hpp"
@@ -23,6 +23,10 @@
 #include "arguments.hpp"
 #include "call_frame.hpp"
 #include "lookup_data.hpp"
+
+#include "on_stack.hpp"
+
+#include "helpers.hpp"
 
 namespace rubinius {
   namespace Helpers {
@@ -188,7 +192,7 @@ namespace rubinius {
         Exception* exc =
           Exception::make_type_error(state, Class::type, super, message.str().c_str());
         exc->locations(state, Location::from_call_stack(state, call_frame));
-        state->thread_state()->raise_exception(exc);
+        state->raise_exception(exc);
         return NULL;
       }
 
@@ -252,7 +256,7 @@ namespace rubinius {
       return module;
     }
 
-    bool yield_debugger(STATE, CallFrame* call_frame, Object* bp) {
+    bool yield_debugger(STATE, GCToken gct, CallFrame* call_frame, Object* bp) {
       Thread* cur = Thread::current(state);
       Thread* debugger = cur->debugger_thread();
 
@@ -278,7 +282,7 @@ namespace rubinius {
 
       // If we're hitting here, clear any chance that step would be used
       // without being explicitly requested.
-      state->clear_thread_step();
+      state->vm()->clear_thread_step();
 
       state->set_call_frame(call_frame);
 
@@ -292,11 +296,13 @@ namespace rubinius {
 
       Array* locs = Location::from_call_stack(state, call_frame, true, true);
 
-      debugger_chan->send(state,
+      OnStack<1> os(state, my_control);
+
+      debugger_chan->send(state, gct,
           Tuple::from(state, 4, bp, cur, my_control, locs));
 
       // Block until the debugger wakes us back up.
-      Object* ret = my_control->receive(state, call_frame);
+      Object* ret = my_control->receive(state, gct, call_frame);
 
       // Do not access any locals other than ret beyond here unless you add OnStack<>
       // to them! The GC has probably run and moved things.
@@ -307,8 +313,8 @@ namespace rubinius {
 
       // Process a few commands...
       if(ret == state->symbol("step")) {
-        state->get_attention();
-        state->set_thread_step();
+        state->vm()->get_attention();
+        state->vm()->set_thread_step();
       }
 
       // All done!
